@@ -10,10 +10,17 @@ import {
   Search,
   Eye,
   EyeOff,
+  Network,
 } from '@lucide/vue';
 import JsonEditor from './JsonEditor.vue';
 import * as bridge from '../lib/bridge';
-import { defaultTools, type HttpTool, type McpServer, type ToolConfiguration } from '../lib/tools';
+import {
+  defaultTools,
+  defaultToolProxy,
+  type HttpTool,
+  type McpServer,
+  type ToolConfiguration,
+} from '../lib/tools';
 import { uid } from '../lib/workspace';
 const props = defineProps<{ busy: boolean }>();
 const emit = defineEmits<{ activity: [value: boolean] }>();
@@ -80,13 +87,13 @@ function addMcp() {
 async function discover(server: McpServer) {
   await run(async () => {
     const previous = new Map(server.tools.map((tool) => [tool.name, tool]));
-    server.tools = (await bridge.discoverMcpTools(JSON.parse(JSON.stringify(server)))).map(
-      (tool) => ({
-        ...tool,
-        enabled: previous.get(tool.name)?.enabled || false,
-        risk: previous.get(tool.name)?.risk || 'external-action',
-      }),
-    );
+    server.tools = (
+      await bridge.discoverMcpTools(JSON.parse(JSON.stringify(server)), { ...config.proxy })
+    ).map((tool) => ({
+      ...tool,
+      enabled: previous.get(tool.name)?.enabled || false,
+      risk: previous.get(tool.name)?.risk || 'external-action',
+    }));
     success.value = `发现 ${server.tools.length} 个 MCP 工具，请勾选需要启用的工具。`;
   });
 }
@@ -100,7 +107,7 @@ async function save() {
 async function testBrave() {
   if (!config.brave.apiKey.trim()) return;
   await run(async () => {
-    const value = await bridge.testBraveSearch(config.brave.apiKey);
+    const value = await bridge.testBraveSearch(config.brave.apiKey, { ...config.proxy });
     testOutput.value = JSON.stringify(value, null, 2).slice(0, 16000);
     success.value = 'Brave Search 连接成功。测试已执行一次搜索；保存后可在工具循环中使用。';
   });
@@ -111,6 +118,7 @@ async function test(tool: HttpTool, index: number) {
     const value = await bridge.testHttpTool(
       JSON.parse(JSON.stringify(tool)),
       testArgs[index] || {},
+      { ...config.proxy },
     );
     testOutput.value = JSON.stringify(value, null, 2).slice(0, 16000);
     success.value = '测试完成，已调用一次配置的 HTTP 接口。';
@@ -119,6 +127,7 @@ async function test(tool: HttpTool, index: number) {
 onMounted(() => {
   void run(async () => {
     Object.assign(config, await bridge.loadToolConfiguration());
+    config.proxy ??= defaultToolProxy();
   });
 });
 </script>
@@ -132,6 +141,40 @@ onMounted(() => {
     <p v-if="!bridge.desktop" class="inline-error">
       浏览器仅预览界面，工具配置和执行在桌面应用中完成。
     </p>
+    <section class="tool-config-section">
+      <h3><Network :size="16" />网络代理</h3>
+      <label class="tool-category-switch"
+        ><span>使用本地代理</span
+        ><input v-model="config.proxy.enabled" type="checkbox" role="switch" :disabled="disabled"
+      /></label>
+      <label v-if="config.proxy.enabled" class="tool-proxy-address"
+        >代理地址<input
+          v-model.trim="config.proxy.url"
+          type="url"
+          placeholder="http://127.0.0.1:7890"
+          autocomplete="off"
+          autocapitalize="off"
+          spellcheck="false"
+          maxlength="4096"
+          :disabled="disabled"
+          required
+        /><span class="field-help"
+          >支持 HTTP、HTTPS、SOCKS5。请填写代理应用的实际端口。</span
+        ></label
+      >
+      <p class="field-help">
+        例如 <code>http://127.0.0.1:7890</code> 或 <code>socks5h://127.0.0.1:1080</code>。SOCKS5
+        推荐 socks5h，由代理端解析域名。
+      </p>
+      <p class="field-help">
+        适用于 Brave Search、HTTP 工具和 MCP
+        的测试、发现与实际调用。测试直接使用当前填写值，保存后从下一次回复生效；关闭后沿用默认网络连接。模型
+        API 和图床沿用各自的连接。
+      </p>
+      <button type="submit" class="secondary-button" :disabled="disabled">
+        <Check :size="13" />保存工具配置
+      </button>
+    </section>
     <section class="tool-config-section">
       <h3><Wrench :size="16" />内置工具</h3>
       <p>当前时间（current_time）与算术计算（calculate）在每个会话中默认开启。</p>
@@ -189,8 +232,8 @@ onMounted(() => {
         </button>
       </div>
       <p class="field-help">
-        测试会向 Brave 执行一次「Brave Search」搜索。保存后，自动模式的对话即可使用；API Key
-        仅用于搜索鉴权，不会发送给模型。
+        测试会向 Brave 执行一次「Brave Search」搜索。保存后，会话中已开启的 Web 搜索即可使用；API
+        Key 仅用于搜索鉴权，不会发送给模型。
       </p>
     </section>
     <section class="tool-config-section">

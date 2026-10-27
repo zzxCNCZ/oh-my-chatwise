@@ -3,6 +3,7 @@ pub mod brave;
 #[cfg(test)]
 mod loop_tests;
 pub mod provider;
+pub mod proxy;
 pub mod tools;
 pub mod transport;
 pub mod types;

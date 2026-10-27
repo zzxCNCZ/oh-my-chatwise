@@ -59,7 +59,13 @@ export interface McpServer {
   headers: Record<string, string>;
   tools: McpTool[];
 }
+export interface ToolProxy {
+  enabled: boolean;
+  url: string;
+}
+export const defaultToolProxy = (): ToolProxy => ({ enabled: false, url: '' });
 export interface ToolConfiguration {
+  proxy: ToolProxy;
   clock: boolean;
   calculator: boolean;
   brave: { enabled: boolean; apiKey: string };
@@ -67,6 +73,7 @@ export interface ToolConfiguration {
   mcp: McpServer[];
 }
 export const defaultTools = (): ToolConfiguration => ({
+  proxy: defaultToolProxy(),
   clock: true,
   calculator: true,
   brave: { enabled: true, apiKey: '' },

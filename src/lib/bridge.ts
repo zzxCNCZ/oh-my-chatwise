@@ -125,9 +125,10 @@ export async function saveToolConfiguration(config: import('./tools').ToolConfig
 }
 export async function discoverMcpTools(
   server: import('./tools').McpServer,
+  proxy: import('./tools').ToolProxy,
 ): Promise<import('./tools').McpTool[]> {
   if (!desktop) throw new Error('请在桌面应用中发现 MCP 工具。');
-  return invoke('discover_mcp_tools', { server });
+  return invoke('discover_mcp_tools', { server, proxy });
 }
 export async function approveTool(id: string, approvalId: string, allow: boolean) {
   return invoke('approve_tool', { id, approvalId, allow });
@@ -135,11 +136,15 @@ export async function approveTool(id: string, approvalId: string, allow: boolean
 export async function testHttpTool(
   config: import('./tools').HttpTool,
   args: Record<string, unknown>,
+  proxy: import('./tools').ToolProxy,
 ): Promise<unknown> {
   if (!desktop) throw new Error('请在桌面应用中测试工具。');
-  return invoke('test_http_tool', { config, args });
+  return invoke('test_http_tool', { config, args, proxy });
 }
-export async function testBraveSearch(apiKey: string): Promise<unknown> {
+export async function testBraveSearch(
+  apiKey: string,
+  proxy: import('./tools').ToolProxy,
+): Promise<unknown> {
   if (!desktop) throw new Error('请在桌面应用中测试 Brave Search。');
-  return invoke('test_brave_search', { apiKey: apiKey.trim() });
+  return invoke('test_brave_search', { apiKey: apiKey.trim(), proxy });
 }

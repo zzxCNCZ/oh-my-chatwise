@@ -709,6 +709,7 @@ mod tests {
     fn portable_encrypted_config_restores_all_fields_without_conversations() {
         let mut config = fixture();
         let tools: crate::agent::tools::Configuration = serde_json::from_value(serde_json::json!({
+            "proxy":{"enabled":true,"url":"socks5h://127.0.0.1:1080"},
             "clock":true,"calculator":true,"brave":{"enabled":true,"apiKey":"private-brave-key"},"http":[{
                 "definition":{"name":"web_search","description":"Search","inputSchema":{"type":"object"},"risk":"read-only"},
                 "enabled":true,"url":"https://search.example.test/query","method":"POST",
@@ -735,6 +736,8 @@ mod tests {
         assert_eq!(restored.api_keys["test-id"], "sample-key");
         assert_eq!(restored.connections[0].model_names["custom"], "别名");
         let tools = restored.tool_configuration.unwrap();
+        assert!(tools.proxy.enabled);
+        assert_eq!(tools.proxy.url, "socks5h://127.0.0.1:1080");
         assert_eq!(tools.brave.api_key, "private-brave-key");
         assert_eq!(
             tools.http[0].headers["Authorization"],

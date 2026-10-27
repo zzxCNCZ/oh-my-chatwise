@@ -1565,6 +1565,16 @@ select {
 }
 
 /* Shared settings use the Forest Glass tokens for conversation and global controls. */
+.tools-settings .tool-proxy-address {
+  margin-top: 18px;
+}
+.tools-settings .tool-proxy-address input {
+  font-family: 'SFMono-Regular', Consolas, monospace;
+  font-size: 12px;
+}
+.tools-settings .tool-proxy-address code {
+  overflow-wrap: anywhere;
+}
 .conversation-tools {
   display: grid;
   gap: 12px;

@@ -507,20 +507,23 @@ async fn save_tool_configuration(
 #[tauri::command]
 async fn discover_mcp_tools(
     server: agent::tools::McpServer,
+    proxy: agent::proxy::Configuration,
     requests: State<'_, Requests>,
 ) -> Result<Vec<agent::tools::McpTool>, String> {
     agent::transport::validate_endpoint(&server.url, &server.headers)?;
-    agent::transport::discover(requests.client.clone(), server).await
+    agent::transport::discover(proxy.client(&requests.client)?, server).await
 }
 #[tauri::command]
 async fn test_brave_search(
     api_key: String,
+    proxy: agent::proxy::Configuration,
     requests: State<'_, Requests>,
 ) -> Result<serde_json::Value, String> {
+    let client = proxy.client(&requests.client)?;
     tokio::time::timeout(
         std::time::Duration::from_secs(30),
         agent::brave::search(
-            &requests.client,
+            &client,
             &api_key,
             &serde_json::json!({"query":"Brave Search","count":3}),
         ),
@@ -532,12 +535,14 @@ async fn test_brave_search(
 async fn test_http_tool(
     config: agent::tools::HttpTool,
     args: serde_json::Value,
+    proxy: agent::proxy::Configuration,
     requests: State<'_, Requests>,
 ) -> Result<serde_json::Value, String> {
     if config.definition.risk != agent::types::Risk::ReadOnly {
         return Err("此工具需要在对话中逐次授权后执行。".into());
     }
     agent::tools::Configuration {
+        proxy: proxy.clone(),
         clock: false,
         calculator: false,
         brave: Default::default(),
@@ -546,9 +551,10 @@ async fn test_http_tool(
     }
     .validate()?;
     agent::tools::validate_arguments(&args, &config.definition.input_schema)?;
+    let client = proxy.client(&requests.client)?;
     tokio::time::timeout(
         std::time::Duration::from_secs(30),
-        agent::transport::http_tool(&requests.client, &config, &args),
+        agent::transport::http_tool(&client, &config, &args),
     )
     .await
     .map_err(|_| "工具测试超时。".to_string())?

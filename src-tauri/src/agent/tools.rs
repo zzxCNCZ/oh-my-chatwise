@@ -11,6 +11,7 @@ use tokio_util::sync::CancellationToken;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default, deny_unknown_fields)]
 pub struct Configuration {
+    pub proxy: super::proxy::Configuration,
     pub clock: bool,
     pub calculator: bool,
     pub brave: super::brave::Configuration,
@@ -20,6 +21,7 @@ pub struct Configuration {
 impl Default for Configuration {
     fn default() -> Self {
         Self {
+            proxy: Default::default(),
             clock: true,
             calculator: true,
             brave: super::brave::Configuration::default(),
@@ -89,6 +91,7 @@ impl Configuration {
         names
     }
     pub fn validate(&self) -> Result<(), String> {
+        self.proxy.validate()?;
         self.brave.validate()?;
         if serde_json::to_vec(self)
             .map_err(|_| "工具配置无效。")?
@@ -164,6 +167,7 @@ impl Configuration {
     }
     pub fn registry(&self, client: &reqwest::Client) -> Result<Registry, String> {
         self.validate()?;
+        let client = self.proxy.client(client)?;
         let mut registry = Registry::default();
         if self.clock {
             registry.register(Arc::new(Builtin::clock()))?;
