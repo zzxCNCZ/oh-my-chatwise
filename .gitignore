@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.DS_Store
+*.local
+src-tauri/target/
+.test-results/
+.pnpm-store/
+release/
+.env
+.env.*
+!.env.example
+.oh-my-chatwise/
