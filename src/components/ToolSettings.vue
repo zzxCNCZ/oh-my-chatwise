@@ -143,6 +143,9 @@ onMounted(() => {
     </p>
     <section class="tool-config-section">
       <h3><Network :size="16" />网络代理</h3>
+      <p class="field-help">
+        仅在本机保存，不参与同步或配置导入导出。请根据这台设备的网络环境单独设置。
+      </p>
       <label class="tool-category-switch"
         ><span>使用本地代理</span
         ><input v-model="config.proxy.enabled" type="checkbox" role="switch" :disabled="disabled"

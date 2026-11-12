@@ -98,8 +98,8 @@ onMounted(() => {
     <div class="storage-section">
       <h3><FolderOpen :size="17" />数据目录</h3>
       <p class="field-help">
-        会话、草稿、图片附件、客户端设置与凭据保存在同一目录。可选择 OneDrive
-        等同步软件管理的文件夹，并将文件设置为始终保留在此设备上。
+        会话、草稿、图片附件、可同步设置与凭据保存在同一目录。可选择 OneDrive
+        等同步软件管理的文件夹，并将文件设置为始终保留在此设备上。当前打开的会话、模型选择与工具代理仅保存在本机，不参与同步。
       </p>
       <label
         >当前设备上的目录
@@ -144,6 +144,9 @@ onMounted(() => {
           <RefreshCw :size="14" />立即同步
         </button>
       </div>
+      <p class="field-help">
+        空闲时每 60 秒自动检查一次，生成回复或编辑时暂缓合并；也可点击「立即同步」。
+      </p>
       <p v-if="status" class="field-help storage-meta">
         设备 {{ status.device.slice(0, 8) }} · {{ status.revisionCount }} 条变更 ·
         {{ status.pending ? '有待合并变更' : '已读取本地可用变更'

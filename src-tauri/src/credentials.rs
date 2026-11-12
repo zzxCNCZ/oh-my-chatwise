@@ -1,4 +1,4 @@
-//! Local-only upgrade snapshot and optional sync password. Never accesses OS credentials.
+//! Local-only upgrade snapshot, sync password and tool proxy. Never accesses OS credentials.
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -9,6 +9,7 @@ use std::{
 };
 const MAX_FILE: u64 = 16 * 1024 * 1024;
 const PASSWORD_KEY: &str = "storage-sync-password";
+pub const LOCAL_TOOL_PROXY_KEY: &str = "local-tool-proxy";
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Document {
@@ -155,6 +156,7 @@ pub fn pending_migration(service: &str) -> Result<Option<BTreeMap<String, String
         }
         let mut entries = s.document()?.entries;
         entries.remove(PASSWORD_KEY);
+        entries.remove(LOCAL_TOOL_PROXY_KEY);
         Ok(Some(entries))
     })
 }
@@ -177,6 +179,12 @@ mod tests {
         let (dir, service) = fixture();
         save(&service, "connection", "sample-key").unwrap();
         save(&service, PASSWORD_KEY, "sample-password").unwrap();
+        save(
+            &service,
+            LOCAL_TOOL_PROXY_KEY,
+            r#"{"enabled":false,"url":""}"#,
+        )
+        .unwrap();
         assert_eq!(
             read(&service, "connection").unwrap().as_deref(),
             Some("sample-key")
@@ -184,6 +192,7 @@ mod tests {
         let pending = pending_migration(&service).unwrap().unwrap();
         assert_eq!(pending.len(), 1);
         assert!(!pending.contains_key(PASSWORD_KEY));
+        assert!(!pending.contains_key(LOCAL_TOOL_PROXY_KEY));
         finish_migration(&service).unwrap();
         assert!(pending_migration(&service).unwrap().is_none());
         #[cfg(unix)]

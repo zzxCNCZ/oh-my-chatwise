@@ -443,15 +443,13 @@ async fn test_image_upload(
 async fn load_tool_configuration(
     app: tauri::AppHandle,
 ) -> Result<agent::tools::Configuration, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let value = stored_secret(&app, "secret/tools")?;
-        value
-            .map(|s| serde_json::from_str(&s).map_err(|_| "工具配置格式有误。".to_string()))
-            .transpose()
-            .map(|c| c.unwrap_or_default())
+    with_storage(app, |session, app| {
+        // A passive read must not acknowledge remote versions for an open editor.
+        let mut view = session.clone();
+        view.refresh_secrets()?;
+        configuration::load_tools(&view, &app.config().identifier)
     })
     .await
-    .map_err(|_| "工具配置读取失败。".to_string())?
 }
 #[tauri::command]
 async fn tool_availability(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
@@ -494,13 +492,7 @@ async fn save_tool_configuration(
 ) -> Result<(), String> {
     config.validate()?;
     with_storage(app, move |session, app| {
-        let value = serde_json::to_string(&config).map_err(|_| "工具配置无效。")?;
-        configuration::publish(
-            session,
-            &app.config().identifier,
-            "secret/tools",
-            Some(&value),
-        )
+        configuration::save_tools(session, &app.config().identifier, &config)
     })
     .await
 }

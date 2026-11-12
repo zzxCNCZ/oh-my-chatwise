@@ -58,23 +58,38 @@ pub fn read_secret(session: &Session, service: &str, key: &str) -> Result<Option
         .secret(key)
         .map(|value| {
             if let Some(text) = value.as_str() {
-                return Ok(text.to_owned());
+                return shared_secret(key, text);
             }
             let password = password(service)?
                 .ok_or("此目录包含加密凭据，请在存储与同步中输入原同步密码解锁。")?;
             let sealed: vault::Sealed =
                 serde_json::from_value(value).map_err(|_| "同步凭据格式有误。")?;
-            String::from_utf8(vault::open(&sealed, &password)?)
-                .map_err(|_| "同步凭据内容有误。".into())
+            let text = String::from_utf8(vault::open(&sealed, &password)?)
+                .map_err(|_| "同步凭据内容有误。")?;
+            shared_secret(key, &text)
         })
         .transpose()
 }
-fn encode_secret(value: &str, password: Option<&str>) -> Result<serde_json::Value, String> {
+// Keep device-local settings out of every shared credential write, including
+// legacy migration, encryption changes and portable configuration imports.
+fn shared_secret(key: &str, value: &str) -> Result<String, String> {
+    if key == "secret/tools" {
+        crate::agent::tools::Configuration::from_shared_json(value)?.shared_json()
+    } else {
+        Ok(value.to_owned())
+    }
+}
+fn encode_secret(
+    key: &str,
+    value: &str,
+    password: Option<&str>,
+) -> Result<serde_json::Value, String> {
+    let value = shared_secret(key, value)?;
     if let Some(password) = password {
         serde_json::to_value(vault::seal(value.as_bytes(), password)?)
             .map_err(|_| "无法编码加密凭据。".into())
     } else {
-        Ok(serde_json::Value::String(value.into()))
+        Ok(serde_json::Value::String(value))
     }
 }
 pub fn publish(
@@ -86,14 +101,41 @@ pub fn publish(
     if value.is_some_and(|v| v.is_empty() || v.len() > 256 * 1024) {
         return Err("凭据为空或超过 256 KB。".into());
     }
-    if session.has_record(key) && read_secret(session, service, key)?.as_deref() == value {
+    let value = value.map(|v| shared_secret(key, v)).transpose()?;
+    if session.has_record(key) && read_secret(session, service, key)? == value {
         return Ok(());
     }
     let password = password(service)?;
     let encoded = value
-        .map(|v| encode_secret(v, password.as_deref()))
+        .as_deref()
+        .map(|v| encode_secret(key, v, password.as_deref()))
         .transpose()?;
     session.write_secret(key, encoded)
+}
+pub fn load_tools(
+    session: &Session,
+    service: &str,
+) -> Result<crate::agent::tools::Configuration, String> {
+    let mut config = read_secret(session, service, "secret/tools")?
+        .map(|value| crate::agent::tools::Configuration::from_shared_json(&value))
+        .transpose()?
+        .unwrap_or_default();
+    config.proxy = crate::agent::proxy::Configuration::load_local(service)?;
+    Ok(config)
+}
+pub fn save_tools(
+    session: &mut Session,
+    service: &str,
+    config: &crate::agent::tools::Configuration,
+) -> Result<(), String> {
+    config.validate()?;
+    publish(
+        session,
+        service,
+        "secret/tools",
+        Some(&config.shared_json()?),
+    )?;
+    config.proxy.save_local(service)
 }
 /// Upgrade already-migrated local files without ever loading OS credentials.
 /// Existing records (including deletions) always win over the recovery snapshot.
@@ -112,7 +154,8 @@ pub fn migrate_local(session: &mut Session, service: &str) -> Result<(), String>
             _ => format!("secret/{id}"),
         };
         if !session.has_record(&key) {
-            values.push((key, Some(encode_secret(&value, password.as_deref())?)));
+            let encoded = encode_secret(&key, &value, password.as_deref())?;
+            values.push((key, Some(encoded)));
         }
     }
     session.write_secrets(values)?;
@@ -155,7 +198,7 @@ pub fn configure_password(
         let target_password = if pass.is_empty() { None } else { Some(pass) };
         // Unlocking an already encrypted record does not rewrite or resolve its heads.
         if raw_is_plain != pass.is_empty() {
-            let encoded = encode_secret(&value, target_password)?;
+            let encoded = encode_secret(&key, &value, target_password)?;
             values.push((key, Some(encoded)));
         }
     }
@@ -317,7 +360,7 @@ pub fn decode(contents: &str, pass: &str) -> Result<Config, String> {
     if package.format != "chatwise-config" || package.version != 1 {
         return Err("不支持此配置文件版本。".into());
     }
-    let config = match (package.encrypted, package.config) {
+    let mut config: Config = match (package.encrypted, package.config) {
         (Some(sealed), None) => serde_json::from_slice(&vault::open(&sealed, pass)?)
             .map_err(|_| "加密配置格式有误。")?,
         (None, Some(config)) => {
@@ -331,6 +374,10 @@ pub fn decode(contents: &str, pass: &str) -> Result<Config, String> {
         }
         _ => return Err("配置文件格式有误。".into()),
     };
+    // Importing an older package must never replace this device's network setup.
+    if let Some(tools) = &mut config.tool_configuration {
+        tools.proxy = Default::default();
+    }
     validate(&config)?;
     Ok(config)
 }
@@ -375,13 +422,18 @@ pub fn apply(
     for (id, key) in &config.api_keys {
         values.push((
             format!("secret/{id}"),
-            Some(encode_secret(key, password.as_deref())?),
+            Some(encode_secret(
+                &format!("secret/{id}"),
+                key,
+                password.as_deref(),
+            )?),
         ));
     }
     if let Some(upload) = &config.image_upload {
         values.push((
             "secret/upload".into(),
             Some(encode_secret(
+                "secret/upload",
                 &serde_json::to_string(upload).unwrap(),
                 password.as_deref(),
             )?),
@@ -391,6 +443,7 @@ pub fn apply(
         values.push((
             "secret/tools".into(),
             Some(encode_secret(
+                "secret/tools",
                 &serde_json::to_string(tools).unwrap(),
                 password.as_deref(),
             )?),
@@ -706,6 +759,189 @@ mod tests {
         serde_json::from_value(serde_json::json!({"connections":[{"id":"test-id","name":"自定义连接","protocol":"responses","baseUrl":"https://api.example.test/v1","models":["custom"],"modelNames":{"custom":"别名"},"hasApiKey":true}],"defaultConnectionId":"test-id","defaultModel":"custom","theme":"light","imageSettings":{"mode":"url","hasUploadConfig":true},"apiKeys":{"test-id":"sample-key"},"imageUpload":{"url":"https://upload.example.test","method":"POST","bodyType":"multipart","fileField":"file","headers":{"Authorization":"sample-upload-key"},"body":{},"responseType":"json","responseUrlPath":"data.url","publicUrlTemplate":""}})).unwrap()
     }
     #[test]
+    fn tool_proxies_stay_local_across_sync_restarts_and_directory_switches() {
+        let root = tempfile::tempdir().unwrap();
+        let shared = root.path().join("shared");
+        let (a, mut first) = device(root.path(), "a", &shared);
+        let mut tools = crate::agent::tools::Configuration::default();
+        tools.brave.api_key = "shared-brave-key".into();
+        tools.proxy = crate::agent::proxy::Configuration {
+            enabled: true,
+            url: "socks5h://127.0.0.1:1080".into(),
+        };
+        save_tools(&mut first, &a, &tools).unwrap();
+        let revision_count = first.status().unwrap().revision_count;
+        let shared_value = first.secret("secret/tools").unwrap();
+        assert!(!shared_value.as_str().unwrap().contains("proxy"));
+        assert!(!shared_value.as_str().unwrap().contains("1080"));
+
+        let (b, mut second) = device(root.path(), "b", &shared);
+        let mut second_tools = load_tools(&second, &b).unwrap();
+        assert_eq!(second_tools.brave.api_key, "shared-brave-key");
+        assert!(second_tools.proxy.is_default());
+        second_tools.proxy = crate::agent::proxy::Configuration {
+            enabled: true,
+            url: "http://127.0.0.1:7890".into(),
+        };
+        save_tools(&mut second, &b, &second_tools).unwrap();
+        first.refresh_secrets().unwrap();
+        assert_eq!(first.status().unwrap().revision_count, revision_count);
+        assert!(first.status().unwrap().conflicts.is_empty());
+        assert_eq!(load_tools(&first, &a).unwrap().proxy.url, tools.proxy.url);
+        assert_eq!(
+            load_tools(&second, &b).unwrap().proxy.url,
+            second_tools.proxy.url
+        );
+
+        second_tools.proxy.enabled = false;
+        save_tools(&mut second, &b, &second_tools).unwrap();
+        assert_eq!(second.status().unwrap().revision_count, revision_count);
+        // Reopening the session reads the device's persisted proxy, not the journal.
+        let mut restarted = Session::default();
+        restarted.init(&root.path().join("b")).unwrap();
+        restarted.load().unwrap();
+        let restored = load_tools(&restarted, &b).unwrap();
+        assert!(!restored.proxy.enabled);
+        assert_eq!(restored.proxy.url, "http://127.0.0.1:7890");
+        restarted
+            .switch(root.path().join("other").to_str().unwrap(), false)
+            .unwrap();
+        assert_eq!(
+            load_tools(&restarted, &b).unwrap().proxy.url,
+            restored.proxy.url
+        );
+        assert!(!load_tools(&restarted, &b).unwrap().proxy.enabled);
+    }
+
+    #[test]
+    fn legacy_remote_proxies_are_ignored_and_never_exported_or_reencrypted() {
+        let root = tempfile::tempdir().unwrap();
+        let (service, mut session) = device(root.path(), "local", &root.path().join("shared"));
+        // An old client may still publish enabled, invalid or differently shaped proxy fields.
+        for proxy in [
+            serde_json::json!({"enabled":true,"url":"http://other-device:7890"}),
+            serde_json::json!({"enabled":true,"url":"invalid-old-address"}),
+            serde_json::json!("obsolete-format"),
+        ] {
+            let legacy =
+                serde_json::json!({"proxy":proxy,"brave":{"enabled":true,"apiKey":"legacy-brave"}});
+            session
+                .write_secret("secret/tools", Some(legacy.to_string().into()))
+                .unwrap();
+            let tools = load_tools(&session, &service).unwrap();
+            assert!(tools.proxy.is_default());
+            assert_eq!(tools.brave.api_key, "legacy-brave");
+        }
+        let workspace: Workspace = serde_json::from_value(serde_json::json!({"version":1,"connections":[],"conversations":[],"defaultConnectionId":"","defaultModel":"","theme":"light"})).unwrap();
+        let local = crate::agent::proxy::Configuration {
+            enabled: true,
+            url: "socks5h://127.0.0.1:1080".into(),
+        };
+        local.save_local(&service).unwrap();
+        session
+            .write_secret(
+                "secret/tools",
+                Some(
+                    serde_json::json!({
+                        "proxy":{"enabled":true,"url":"http://other-device:9999"},
+                        "brave":{"enabled":true,"apiKey":"legacy-brave"}
+                    })
+                    .to_string()
+                    .into(),
+                ),
+            )
+            .unwrap();
+        assert_eq!(load_tools(&session, &service).unwrap().proxy.url, local.url);
+        let exported = export(&workspace, &session, &service, true, "export-password").unwrap();
+        let package: Package = serde_json::from_str(&exported).unwrap();
+        let contents = vault::open(&package.encrypted.unwrap(), "export-password").unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&contents).unwrap();
+        assert!(value["toolConfiguration"].get("proxy").is_none());
+        assert_eq!(
+            value["toolConfiguration"]["brave"]["apiKey"],
+            "legacy-brave"
+        );
+
+        configure_password(&mut session, &service, "sync-password", &workspace).unwrap();
+        let sealed: vault::Sealed =
+            serde_json::from_value(session.secret("secret/tools").unwrap()).unwrap();
+        let raw = vault::open(&sealed, "sync-password").unwrap();
+        assert!(!String::from_utf8(raw).unwrap().contains("proxy"));
+        assert_eq!(load_tools(&session, &service).unwrap().proxy.url, local.url);
+
+        // Even a valid old encrypted portable package cannot alter the local proxy.
+        let mut imported = fixture();
+        imported.tool_configuration = Some(crate::agent::tools::Configuration {
+            proxy: crate::agent::proxy::Configuration {
+                enabled: true,
+                url: "http://other-device:9999".into(),
+            },
+            ..Default::default()
+        });
+        let package = Package {
+            format: "chatwise-config".into(),
+            version: 1,
+            config: None,
+            encrypted: Some(
+                vault::seal(&serde_json::to_vec(&imported).unwrap(), "import-password").unwrap(),
+            ),
+        };
+        let imported =
+            decode(&serde_json::to_string(&package).unwrap(), "import-password").unwrap();
+        assert!(
+            imported
+                .tool_configuration
+                .as_ref()
+                .unwrap()
+                .proxy
+                .is_default()
+        );
+        let mut workspace = workspace;
+        apply(imported, &mut workspace, &service, &mut session, true).unwrap();
+        let restored = load_tools(&session, &service).unwrap();
+        assert!(restored.proxy.enabled);
+        assert_eq!(restored.proxy.url, local.url);
+        let sealed: vault::Sealed =
+            serde_json::from_value(session.secret("secret/tools").unwrap()).unwrap();
+        assert!(
+            !String::from_utf8(vault::open(&sealed, "sync-password").unwrap())
+                .unwrap()
+                .contains("proxy")
+        );
+    }
+
+    #[test]
+    fn legacy_local_migration_never_publishes_device_proxy() {
+        let root = tempfile::tempdir().unwrap();
+        let service = uuid::Uuid::new_v4().to_string();
+        let local = root.path().join("local");
+        credentials::initialize(&service, &local).unwrap();
+        let proxy = crate::agent::proxy::Configuration {
+            enabled: true,
+            url: "http://127.0.0.1:7890".into(),
+        };
+        proxy.save_local(&service).unwrap();
+        credentials::save(&service, "tool-configuration", r#"{"proxy":{"enabled":true,"url":"http://old-device:9999"},"brave":{"enabled":true,"apiKey":"keep-key"}}"#).unwrap();
+        let mut session = Session::default();
+        session
+            .init_with_default(&local, &root.path().join("shared"))
+            .unwrap();
+        migrate_local(&mut session, &service).unwrap();
+        assert!(!session.has_record("secret/local-tool-proxy"));
+        assert!(
+            !session
+                .secret("secret/tools")
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .contains("proxy")
+        );
+        let restored = load_tools(&session, &service).unwrap();
+        assert_eq!(restored.brave.api_key, "keep-key");
+        assert_eq!(restored.proxy.url, proxy.url);
+    }
+
+    #[test]
     fn portable_encrypted_config_restores_all_fields_without_conversations() {
         let mut config = fixture();
         let tools: crate::agent::tools::Configuration = serde_json::from_value(serde_json::json!({
@@ -736,8 +972,7 @@ mod tests {
         assert_eq!(restored.api_keys["test-id"], "sample-key");
         assert_eq!(restored.connections[0].model_names["custom"], "别名");
         let tools = restored.tool_configuration.unwrap();
-        assert!(tools.proxy.enabled);
-        assert_eq!(tools.proxy.url, "socks5h://127.0.0.1:1080");
+        assert!(tools.proxy.is_default());
         assert_eq!(tools.brave.api_key, "private-brave-key");
         assert_eq!(
             tools.http[0].headers["Authorization"],

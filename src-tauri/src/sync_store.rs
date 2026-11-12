@@ -35,6 +35,16 @@ struct Location {
     directory: Option<PathBuf>,
     device: String,
     active_conversation_id: Option<String>,
+    #[serde(default)]
+    default_selection: ModelSelection,
+    #[serde(default)]
+    chat_selections: BTreeMap<String, ModelSelection>,
+}
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct ModelSelection {
+    connection_id: String,
+    model: String,
 }
 #[derive(Clone, Default)]
 pub struct Session {
@@ -194,6 +204,11 @@ fn winner(revs: &[Revision]) -> Option<&Revision> {
         .find(|r| r.value.is_some())
         .or_else(|| revs.last())
 }
+fn shared_chat_value(mut value: Value) -> Value {
+    value["connectionId"] = json!("");
+    value["model"] = json!("");
+    value
+}
 pub fn records(workspace: &Workspace) -> Result<Records, String> {
     if workspace.version != 1 || !matches!(workspace.theme.as_str(), "dark" | "light" | "system") {
         return Err("工作空间配置格式不受支持。".into());
@@ -204,10 +219,10 @@ pub fn records(workspace: &Workspace) -> Result<Records, String> {
         if !valid_key(&key) || result.contains_key(&key) {
             return Err("会话 ID 无效或重复。".into());
         }
-        result.insert(
-            key,
-            serde_json::to_value(chat).map_err(|_| "无法序列化会话。")?,
-        );
+        let value = serde_json::to_value(chat).map_err(|_| "无法序列化会话。")?;
+        // Current model choices are device-local. Preserve the wire fields for
+        // older readers; actual assistant model metadata stays in the messages.
+        result.insert(key, shared_chat_value(value));
     }
     for connection in &workspace.connections {
         let key = format!("connection/{}", connection.id);
@@ -240,14 +255,6 @@ pub fn records(workspace: &Workspace) -> Result<Records, String> {
         result.insert("preference/defaultPromptId".into(), json!(id));
     }
     result.insert("preference/theme".into(), json!(workspace.theme));
-    result.insert(
-        "preference/defaultConnectionId".into(),
-        json!(workspace.default_connection_id),
-    );
-    result.insert(
-        "preference/defaultModel".into(),
-        json!(workspace.default_model),
-    );
     let images = serde_json::to_value(&workspace.image_settings).unwrap();
     result.insert("preference/imageSettings".into(), images);
     Ok(result)
@@ -277,6 +284,9 @@ fn materialize(heads: &Heads, active: Option<String>) -> Result<Workspace, Strin
             }
             value["prompts"].as_array_mut().unwrap().push(item);
         } else if let Some(name) = key.strip_prefix("preference/") {
+            if matches!(name, "defaultConnectionId" | "defaultModel") {
+                continue;
+            }
             value[name] = item;
         }
     }
@@ -355,6 +365,8 @@ impl Session {
                 directory: None,
                 device: uuid::Uuid::new_v4().to_string(),
                 active_conversation_id: None,
+                default_selection: Default::default(),
+                chat_selections: Default::default(),
             }
         };
         if location.version != 1 || uuid::Uuid::parse_str(&location.device).is_err() {
@@ -411,6 +423,47 @@ impl Session {
     pub fn device(&self) -> &str {
         &self.location.as_ref().unwrap().device
     }
+    fn apply_model_selections(&self, workspace: &mut Workspace) {
+        let location = self.location.as_ref().unwrap();
+        let valid = |selection: &ModelSelection| {
+            workspace.connections.iter().any(|connection| {
+                connection.id == selection.connection_id
+                    && connection.models.contains(&selection.model)
+            })
+        };
+        let fallback = if valid(&location.default_selection) {
+            location.default_selection.clone()
+        } else {
+            workspace
+                .connections
+                .iter()
+                .find_map(|connection| {
+                    connection.models.first().map(|model| ModelSelection {
+                        connection_id: connection.id.clone(),
+                        model: model.clone(),
+                    })
+                })
+                .unwrap_or_default()
+        };
+        let selections: Vec<_> = workspace
+            .conversations
+            .iter()
+            .map(|chat| {
+                location
+                    .chat_selections
+                    .get(&chat.id)
+                    .filter(|selection| valid(selection))
+                    .cloned()
+                    .unwrap_or_else(|| fallback.clone())
+            })
+            .collect();
+        workspace.default_connection_id = fallback.connection_id;
+        workspace.default_model = fallback.model;
+        for (chat, selection) in workspace.conversations.iter_mut().zip(selections) {
+            chat.connection_id = selection.connection_id;
+            chat.model = selection.model;
+        }
+    }
     pub fn load(&mut self) -> Result<Option<Workspace>, String> {
         let dir = self.directory()?;
         if self.location.as_ref().unwrap().directory.is_some() && !dir.is_dir() {
@@ -418,7 +471,7 @@ impl Session {
                 "配置的数据目录暂不可用。请等待同步盘挂载，或在存储设置中切换目录。".into(),
             );
         }
-        let (mut heads, _, _) = scan(&dir)?;
+        let (mut heads, mut fingerprint, _) = scan(&dir)?;
         if heads.is_empty()
             && let Some(legacy) = crate::storage::load(&dir)?
         {
@@ -433,7 +486,9 @@ impl Session {
                 })
                 .collect();
             write_event(&dir, changes)?;
-            heads = scan(&dir)?.0;
+            let scanned = scan(&dir)?;
+            heads = scanned.0;
+            fingerprint = scanned.1;
             if self
                 .location
                 .as_ref()
@@ -446,8 +501,7 @@ impl Session {
                 self.persist_location()?;
             }
         }
-        let (_, fingerprint, _) = scan(&dir)?;
-        let workspace = materialize(
+        let mut workspace = materialize(
             &heads,
             self.location
                 .as_ref()
@@ -455,6 +509,7 @@ impl Session {
                 .active_conversation_id
                 .clone(),
         )?;
+        self.apply_model_selections(&mut workspace);
         self.baseline = records(&workspace)?;
         self.heads = heads;
         self.fingerprint = fingerprint;
@@ -501,12 +556,36 @@ impl Session {
             .chain(self.heads.values().flatten().map(|r| r.id.clone()))
             .collect();
         self.fingerprint = observed.into_iter().collect::<Vec<_>>().join(",");
-        if self.location.as_ref().unwrap().active_conversation_id
-            != workspace.active_conversation_id
+        let location = self.location.as_mut().unwrap();
+        let default_selection = ModelSelection {
+            connection_id: workspace.default_connection_id.clone(),
+            model: workspace.default_model.clone(),
+        };
+        let chat_selections = workspace
+            .conversations
+            .iter()
+            .map(|chat| {
+                (
+                    chat.id.clone(),
+                    ModelSelection {
+                        connection_id: chat.connection_id.clone(),
+                        model: chat.model.clone(),
+                    },
+                )
+            })
+            .collect();
+        if location.active_conversation_id != workspace.active_conversation_id
+            || location.default_selection != default_selection
+            || location.chat_selections != chat_selections
         {
-            self.location.as_mut().unwrap().active_conversation_id =
-                workspace.active_conversation_id.clone();
-            self.persist_location()?;
+            let previous = location.clone();
+            location.active_conversation_id = workspace.active_conversation_id.clone();
+            location.default_selection = default_selection;
+            location.chat_selections = chat_selections;
+            if let Err(error) = self.persist_location() {
+                self.location = Some(previous);
+                return Err(error);
+            }
         }
         Ok(())
     }
@@ -569,10 +648,32 @@ impl Session {
         let (heads, fingerprint, count) = scan(&self.directory()?)?;
         let conflicts = heads
             .iter()
-            .filter(|(_, revs)| {
+            .filter(|(key, _)| {
+                !matches!(
+                    key.as_str(),
+                    "preference/defaultModel" | "preference/defaultConnectionId"
+                )
+            })
+            .filter(|(key, revs)| {
+                if revs.len() < 2 {
+                    return false;
+                }
                 let values: BTreeSet<_> = revs
                     .iter()
-                    .map(|r| serde_json::to_string(&r.value).unwrap())
+                    .map(|r| {
+                        let value = if key.starts_with("chat/") {
+                            r.value.clone().map(|value| {
+                                if value.is_object() {
+                                    shared_chat_value(value)
+                                } else {
+                                    value
+                                }
+                            })
+                        } else {
+                            r.value.clone()
+                        };
+                        serde_json::to_string(&value).unwrap()
+                    })
                     .collect();
                 values.len() > 1
             })
@@ -980,6 +1081,134 @@ mod tests {
         a.save(&wa).unwrap();
         b.save(&wb).unwrap();
         assert_eq!(a.status().unwrap().conflicts[0].key, "preference/theme");
+    }
+    #[test]
+    fn model_choices_are_local_while_messages_and_connections_still_sync() {
+        let root = tempfile::tempdir().unwrap();
+        let shared = root.path().join("shared");
+        let mut a = start(&root.path().join("device-a"), &shared);
+        let mut initial = blank();
+        initial.connections.push(
+            serde_json::from_value(json!({
+                "id":"endpoint","name":"Test endpoint","protocol":"responses",
+                "baseUrl":"https://example.invalid/v1","models":["first","second"],"hasApiKey":false
+            }))
+            .unwrap(),
+        );
+        initial.conversations.push(chat("one", "Shared chat"));
+        initial.default_connection_id = "endpoint".into();
+        initial.default_model = "second".into();
+        initial.conversations[0].connection_id = "endpoint".into();
+        initial.conversations[0].model = "second".into();
+        a.save(&initial).unwrap();
+        let count = a.status().unwrap().revision_count;
+        let mut b = start(&root.path().join("device-b"), &shared);
+        let mut wb = b.load().unwrap().unwrap();
+        assert_eq!(wb.default_model, "first");
+        assert_eq!(wb.conversations[0].model, "first");
+        b.save(&wb).unwrap();
+        let mut wa = a.load().unwrap().unwrap();
+        assert_eq!(wa.default_model, "second");
+        assert_eq!(wa.conversations[0].model, "second");
+        // Choosing a model on an existing empty chat publishes no shared revision.
+        wa.conversations[0].model = "first".into();
+        a.save(&wa).unwrap();
+        assert_eq!(a.status().unwrap().revision_count, count);
+        assert!(!a.status().unwrap().pending);
+        assert!(a.status().unwrap().conflicts.is_empty());
+        wb.conversations[0].model = "second".into();
+        wb.default_model = "second".into();
+        b.save(&wb).unwrap();
+        assert_eq!(b.status().unwrap().revision_count, count);
+        assert_eq!(a.load().unwrap().unwrap().conversations[0].model, "first");
+        wb.conversations[0].messages.push(
+            serde_json::from_value(json!({
+                "id":"answer","role":"assistant","content":"Shared response",
+                "createdAt":"now","status":"complete","model":"second"
+            }))
+            .unwrap(),
+        );
+        b.save(&wb).unwrap();
+        let received = a.load().unwrap().unwrap();
+        assert_eq!(received.conversations[0].model, "first");
+        assert_eq!(
+            received.conversations[0].messages[0].model.as_deref(),
+            Some("second")
+        );
+        let mut restarted = Session::default();
+        restarted.init(&root.path().join("device-b")).unwrap();
+        let restored = restarted.load().unwrap().unwrap();
+        assert_eq!(restored.default_model, "second");
+        assert_eq!(restored.conversations[0].model, "second");
+        assert!(!a.heads.contains_key("preference/defaultModel"));
+        assert!(!a.heads.contains_key("preference/defaultConnectionId"));
+    }
+
+    #[test]
+    fn legacy_shared_model_preferences_cannot_override_local_choices_or_block_on_conflicts() {
+        let root = tempfile::tempdir().unwrap();
+        let mut session = start(&root.path().join("device"), &root.path().join("shared"));
+        let mut workspace = blank();
+        workspace.connections.push(
+            serde_json::from_value(json!({
+                "id":"endpoint","name":"Test","protocol":"chat-completions",
+                "baseUrl":"https://example.invalid/v1","models":["local","other"],"hasApiKey":false
+            }))
+            .unwrap(),
+        );
+        workspace.default_connection_id = "endpoint".into();
+        workspace.default_model = "local".into();
+        workspace.conversations.push(chat("one", "Original"));
+        workspace.conversations[0].connection_id = "endpoint".into();
+        workspace.conversations[0].model = "local".into();
+        session.save(&workspace).unwrap();
+        write_event(
+            &session.directory().unwrap(),
+            ["other", "unknown"]
+                .iter()
+                .map(|model| Revision {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    device: uuid::Uuid::new_v4().to_string(),
+                    key: "preference/defaultModel".into(),
+                    supersedes: vec![],
+                    value: Some(json!(model)),
+                })
+                .collect(),
+        )
+        .unwrap();
+        assert!(session.status().unwrap().conflicts.is_empty());
+        let parents = session.heads["chat/one"]
+            .iter()
+            .map(|r| r.id.clone())
+            .collect::<Vec<_>>();
+        write_event(
+            &session.directory().unwrap(),
+            ["other", "unknown"]
+                .iter()
+                .map(|model| {
+                    let mut value = serde_json::to_value(&workspace.conversations[0]).unwrap();
+                    value["model"] = json!(model);
+                    Revision {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        device: uuid::Uuid::new_v4().to_string(),
+                        key: "chat/one".into(),
+                        supersedes: parents.clone(),
+                        value: Some(value),
+                    }
+                })
+                .collect(),
+        )
+        .unwrap();
+        assert!(session.status().unwrap().conflicts.is_empty());
+        let restored = session.load().unwrap().unwrap();
+        assert_eq!(restored.default_model, "local");
+        assert_eq!(restored.conversations[0].model, "local");
+        // A removed model falls back to a valid model on this device.
+        workspace.connections[0].models = vec!["other".into()];
+        session.save(&workspace).unwrap();
+        let restored = session.load().unwrap().unwrap();
+        assert_eq!(restored.default_model, "other");
+        assert_eq!(restored.conversations[0].model, "other");
     }
     #[test]
     fn sync_software_conflict_copies_are_deduplicated_and_corruption_blocks_writes() {

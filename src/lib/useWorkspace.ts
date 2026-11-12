@@ -135,6 +135,14 @@ export function useWorkspace() {
   let saveTimer: ReturnType<typeof setTimeout> | undefined;
   let toastTimer: ReturnType<typeof setTimeout> | undefined;
   let saveQueue = Promise.resolve();
+  let saving = false;
+  let pendingSave: { snapshot: Workspace; encoded: string } | undefined;
+  let saveWaiters: { resolve: () => void; reject: (error: unknown) => void }[] = [];
+  let lastSaved = '';
+  let dirtySince: number | undefined;
+  let polling = false;
+  let pollFailures = 0;
+  let retryPollAt = 0;
 
   function notify(message: string) {
     toast.value = message;
@@ -145,25 +153,54 @@ export function useWorkspace() {
   }
   function persist() {
     if (loadError.value) return Promise.reject(new Error('无法读取原有数据，已禁止覆盖保存。'));
-    const snapshot = JSON.parse(JSON.stringify(workspace)) as Workspace;
-    writes++;
-    saveQueue = saveQueue
-      .catch(() => {})
-      .then(() => bridge.saveWorkspace(snapshot))
-      .finally(() => writes--);
-    saveQueue.catch((error) => notify(`保存失败：${String(error)}`));
-    return saveQueue;
+    clearTimeout(saveTimer);
+    saveTimer = undefined;
+    dirtySince = undefined;
+    const encoded = JSON.stringify(workspace);
+    if (!saving && encoded === lastSaved) return Promise.resolve();
+    pendingSave = { snapshot: JSON.parse(encoded) as Workspace, encoded };
+    const result = new Promise<void>((resolve, reject) => saveWaiters.push({ resolve, reject }));
+    // Keep at most one active write and one latest pending snapshot. Callers
+    // waiting for durability are resolved only after their snapshot (or newer) saves.
+    if (!saving) saveQueue = drainSaves();
+    result.catch((error) => notify(`保存失败：${String(error)}`));
+    return result;
+  }
+  async function drainSaves() {
+    saving = true;
+    writes = 1;
+    try {
+      while (pendingSave) {
+        const next = pendingSave;
+        const waiters = saveWaiters;
+        pendingSave = undefined;
+        saveWaiters = [];
+        try {
+          if (next.encoded !== lastSaved) await bridge.saveWorkspace(next.snapshot);
+          lastSaved = next.encoded;
+          waiters.forEach(({ resolve }) => resolve());
+        } catch (error) {
+          waiters.forEach(({ reject }) => reject(error));
+        }
+      }
+    } finally {
+      saving = false;
+      writes = 0;
+    }
   }
   watch(
     workspace,
     () => {
-      if (!ready.value || applying || dataActivity.value || loadError.value || saveTimer) return;
+      if (!ready.value || applying || dataActivity.value || loadError.value) return;
+      dirtySince ??= Date.now();
+      if (busy.value && saveTimer) return;
+      clearTimeout(saveTimer);
       saveTimer = setTimeout(
         () => {
           saveTimer = undefined;
           void persist();
         },
-        busy.value ? 10000 : 600,
+        busy.value ? 30000 : Math.max(0, Math.min(3000, 10000 - (Date.now() - dirtySince))),
       );
     },
     { deep: true, flush: 'sync' },
@@ -216,6 +253,7 @@ export function useWorkspace() {
     operation?: () => Promise<unknown>,
     allowLoadError = false,
     allowUnavailable = false,
+    background = false,
   ) {
     if (busy.value || dataActivity.value || attachmentActivity.value)
       throw new Error('请先完成回复或附件处理。');
@@ -226,7 +264,7 @@ export function useWorkspace() {
     saveTimer = undefined;
     let reloading = false;
     try {
-      if (!loadError.value) {
+      if (!loadError.value && !background) {
         try {
           await persist();
         } catch (error) {
@@ -240,12 +278,16 @@ export function useWorkspace() {
       try {
         Object.assign(workspace, normalizeWorkspace(saved || initialWorkspace()));
         ensureCurrent();
+        lastSaved = JSON.stringify(workspace);
       } finally {
         applying = false;
       }
       loadError.value = '';
       syncError.value = '';
-      await refreshStatus();
+      pollFailures = 0;
+      retryPollAt = 0;
+      if (!background) await refreshStatus();
+      else if (storage.value) storage.value.pending = false;
       await refreshTools();
     } catch (error) {
       syncError.value = String(error);
@@ -258,6 +300,8 @@ export function useWorkspace() {
   async function pollStorage(allowRefresh = true) {
     if (
       !bridge.desktop ||
+      polling ||
+      Date.now() < retryPollAt ||
       dataActivity.value ||
       busy.value ||
       attachmentActivity.value ||
@@ -266,12 +310,29 @@ export function useWorkspace() {
       loadError.value
     )
       return;
+    polling = true;
     try {
       await refreshStatus();
-      if (storage.value?.pending && allowRefresh) await dataOperation();
+      // Re-check after slow disk I/O: edits or a response may have started while
+      // checking status. Never reload over a newly dirty workspace.
+      if (
+        storage.value?.pending &&
+        allowRefresh &&
+        !saveTimer &&
+        !writes &&
+        !busy.value &&
+        !attachmentActivity.value &&
+        !dataActivity.value
+      )
+        await dataOperation(undefined, false, false, true);
+      pollFailures = 0;
+      retryPollAt = 0;
       syncError.value = '';
     } catch (error) {
       syncError.value = String(error);
+      retryPollAt = Date.now() + Math.min(300000, 60000 * 2 ** pollFailures++);
+    } finally {
+      polling = false;
     }
   }
   async function changeDirectory(directory: string, migrate: boolean) {

@@ -32,6 +32,7 @@ import GenerationSettings from './GenerationSettings.vue';
 import PromptManager from './PromptManager.vue';
 import { defaultGeneration } from '../lib/workspace';
 import { desktop } from '../lib/bridge';
+import { version as appVersion } from '../../package.json';
 import { protocols, type Connection, type Workspace } from '../lib/types';
 import { uid } from '../lib/workspace';
 const props = defineProps<{
@@ -232,7 +233,9 @@ onBeforeUnmount(() => document.removeEventListener('keydown', trapFocus, true));
       tabindex="-1"
     >
       <aside class="settings-nav">
-        <h2 id="settings-title">设置<span class="version-tag">v0.1.0</span></h2>
+        <h2 id="settings-title">
+          设置<span class="version-tag">v{{ appVersion }}</span>
+        </h2>
         <button
           :class="{ selected: tab === 'connections' }"
           :disabled="blocked || saving"
@@ -512,7 +515,7 @@ onBeforeUnmount(() => document.removeEventListener('keydown', trapFocus, true));
             <AppIcon :size="96" />
             <h1><BrandLogo :icon-size="0" /></h1>
             <p>一个空间，无限思绪。</p>
-            <span class="version-tag">版本 0.1.0</span>
+            <span class="version-tag">版本 {{ appVersion }}</span>
             <p class="about-description">
               由 Vue 3、TypeScript 与 Rust 构建的轻量桌面对话应用。<br />自由连接模型，让每个好想法都有回响。
             </p>

@@ -54,7 +54,7 @@ describe('tool proxy bridge', () => {
     ]);
   });
 
-  it('persists the proxy together with the remaining tool configuration', async () => {
+  it('passes the proxy to the desktop command for device-local persistence', async () => {
     const config = defaultTools();
     config.proxy = { enabled: true, url: 'http://127.0.0.1:7890' };
     await saveToolConfiguration(config);

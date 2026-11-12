@@ -11,6 +11,7 @@ use tokio_util::sync::CancellationToken;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default, deny_unknown_fields)]
 pub struct Configuration {
+    #[serde(skip_serializing_if = "super::proxy::Configuration::is_default")]
     pub proxy: super::proxy::Configuration,
     pub clock: bool,
     pub calculator: bool,
@@ -68,6 +69,22 @@ pub struct McpTool {
     pub risk: Risk,
 }
 impl Configuration {
+    /// Legacy shared records can contain another device's proxy, including stale
+    /// or malformed values. Discard it before decoding or validating tools.
+    pub fn from_shared_json(value: &str) -> Result<Self, String> {
+        let mut value: Value = serde_json::from_str(value).map_err(|_| "工具配置格式有误。")?;
+        if let Some(object) = value.as_object_mut() {
+            object.remove("proxy");
+        }
+        serde_json::from_value(value).map_err(|_| "工具配置格式有误。".into())
+    }
+
+    pub fn shared_json(&self) -> Result<String, String> {
+        let mut shared = self.clone();
+        shared.proxy = Default::default();
+        serde_json::to_string(&shared).map_err(|_| "工具配置无效。".into())
+    }
+
     pub fn configured_names(&self) -> Vec<String> {
         let mut names = Vec::new();
         if self.brave.active() {

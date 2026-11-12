@@ -361,7 +361,7 @@ onMounted(async () => {
   storagePoll = setInterval(() => {
     const editing = document.activeElement?.matches('input, textarea, [contenteditable="true"]');
     if (!settingsOpen.value && !document.hidden && !editing) void state.pollStorage();
-  }, 10000);
+  }, 60000);
   applyTheme();
 });
 onBeforeUnmount(() => {
@@ -587,7 +587,7 @@ onBeforeUnmount(() => {
               ><ChevronsUpDown :size="14" />
             </button>
             <div v-if="modelMenu" class="dropdown model-dropdown" @click.stop>
-              <div class="dropdown-heading">选择一个模型</div>
+              <div class="dropdown-heading">选择模型 · 仅在本机生效</div>
               <div v-if="!workspace.connections.length" class="no-models">
                 <Globe2 :size="25" />
                 <p>你的模型，由你选择</p>

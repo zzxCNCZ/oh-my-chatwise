@@ -116,6 +116,11 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Check out release notes
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
       - name: Download verified packages
         uses: actions/download-artifact@v4
         with:
@@ -145,6 +150,10 @@ jobs:
           当前使用 ad-hoc 签名，未进行 Apple Developer ID 签名和公证。
           macOS 首次打开可能需要在「系统设置 → 隐私与安全性」中允许打开。
           NOTES
+
+          if [ -f ".github/release-notes/${RELEASE_TAG}.md" ]; then
+            cat ".github/release-notes/${RELEASE_TAG}.md" > release-notes.md
+          fi
 
           if draft=$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft); then
             if [ "$draft" != true ]; then

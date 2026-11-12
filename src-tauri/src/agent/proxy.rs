@@ -10,6 +10,26 @@ pub struct Configuration {
 }
 
 impl Configuration {
+    pub fn is_default(&self) -> bool {
+        !self.enabled && self.url.is_empty()
+    }
+
+    pub fn load_local(service: &str) -> Result<Self, String> {
+        let config: Self =
+            crate::credentials::read(service, crate::credentials::LOCAL_TOOL_PROXY_KEY)?
+                .map(|value| serde_json::from_str(&value).map_err(|_| "本机工具代理配置格式有误。"))
+                .transpose()?
+                .unwrap_or_default();
+        config.validate()?;
+        Ok(config)
+    }
+
+    pub fn save_local(&self, service: &str) -> Result<(), String> {
+        self.validate()?;
+        let value = serde_json::to_string(self).map_err(|_| "无法编码本机工具代理配置。")?;
+        crate::credentials::save(service, crate::credentials::LOCAL_TOOL_PROXY_KEY, &value)
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         if !self.enabled {
             return Ok(());

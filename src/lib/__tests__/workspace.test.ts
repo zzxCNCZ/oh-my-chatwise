@@ -664,6 +664,164 @@ describe('conversation lifecycle', () => {
 });
 
 describe('storage synchronization lifecycle', () => {
+  it('debounces typing for three seconds with a ten-second maximum wait', async () => {
+    const state = useWorkspace();
+    await state.initialize();
+    for (let index = 0; index < 10; index++) {
+      state.current.value!.draft = `draft ${index}`;
+      await vi.advanceTimersByTimeAsync(1000);
+    }
+    expect(bridge.saveWorkspace).toHaveBeenCalledTimes(1);
+    expect(bridge.saveWorkspace).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        conversations: [expect.objectContaining({ draft: 'draft 9' })],
+      }),
+    );
+    state.current.value!.draft = 'finished';
+    await vi.advanceTimersByTimeAsync(2999);
+    expect(bridge.saveWorkspace).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(bridge.saveWorkspace).toHaveBeenCalledTimes(2);
+  });
+
+  it('coalesces slow writes into one active and one latest snapshot without losing edits', async () => {
+    const state = useWorkspace();
+    await state.initialize();
+    let finish!: () => void;
+    bridge.saveWorkspace.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    state.renameChat(state.current.value!, 'first');
+    state.renameChat(state.current.value!, 'second');
+    state.renameChat(state.current.value!, 'third');
+    state.renameChat(state.current.value!, 'latest');
+    expect(bridge.saveWorkspace).toHaveBeenCalledTimes(1);
+    finish();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(bridge.saveWorkspace).toHaveBeenCalledTimes(2);
+    expect(bridge.saveWorkspace).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        conversations: [expect.objectContaining({ title: 'latest' })],
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(60000);
+    expect(bridge.saveWorkspace).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not overlap status checks or reload over edits made during a slow status read', async () => {
+    const state = useWorkspace();
+    await state.initialize();
+    let finish!: (value: unknown) => void;
+    bridge.storageStatus.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const firstPoll = state.pollStorage();
+    await state.pollStorage();
+    expect(bridge.storageStatus).toHaveBeenCalledTimes(1);
+    state.current.value!.draft = 'typed during slow sync';
+    finish({ pending: true, conflicts: [] });
+    await firstPoll;
+    expect(bridge.loadWorkspace).toHaveBeenCalledTimes(1);
+    expect(state.current.value!.draft).toBe('typed during slow sync');
+    expect(state.dataActivity.value).toBe(false);
+  });
+
+  it('waits for a coalesced user turn to reach disk before sending it to the model', async () => {
+    const state = useWorkspace();
+    await state.initialize();
+    await state.saveConnection({ ...connection }, '');
+    bridge.saveWorkspace.mockClear();
+    let finishFirst!: () => void;
+    let finishTurn!: () => void;
+    bridge.saveWorkspace
+      .mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            finishFirst = resolve;
+          }),
+      )
+      .mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            finishTurn = resolve;
+          }),
+      );
+    bridge.streamChat.mockImplementation(async (_request, push) => {
+      push({ kind: 'text', text: 'answer' });
+      return 'complete';
+    });
+    state.renameChat(state.current.value!, 'Pending rename');
+    const sending = state.send('durable question');
+    expect(bridge.streamChat).not.toHaveBeenCalled();
+    finishFirst();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(bridge.saveWorkspace).toHaveBeenCalledTimes(2);
+    expect(bridge.streamChat).not.toHaveBeenCalled();
+    expect(bridge.saveWorkspace.mock.calls[1]![0].conversations[0].messages[0].content).toBe(
+      'durable question',
+    );
+    finishTurn();
+    await sending;
+    expect(bridge.streamChat).toHaveBeenCalledTimes(1);
+  });
+
+  it('checkpoints a long response at thirty seconds and saves its final output immediately', async () => {
+    const state = useWorkspace();
+    await state.initialize();
+    await state.saveConnection({ ...connection }, '');
+    bridge.saveWorkspace.mockClear();
+    let finish!: () => void;
+    let push!: (event: StreamEvent) => void;
+    bridge.streamChat.mockImplementation((_request, onEvent) => {
+      push = onEvent;
+      return new Promise<string>((resolve) => {
+        finish = () => resolve('complete');
+      });
+    });
+    const sending = state.send('question');
+    await vi.advanceTimersByTimeAsync(0);
+    const initialWrites = bridge.saveWorkspace.mock.calls.length;
+    push({ kind: 'text', text: 'partial' });
+    await vi.advanceTimersByTimeAsync(29999);
+    expect(bridge.saveWorkspace).toHaveBeenCalledTimes(initialWrites);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(bridge.saveWorkspace).toHaveBeenCalledTimes(initialWrites + 1);
+    push({ kind: 'text', text: ' final' });
+    finish();
+    await sending;
+    expect(bridge.saveWorkspace).toHaveBeenCalledWith(
+      expect.objectContaining({
+        conversations: [
+          expect.objectContaining({
+            messages: expect.arrayContaining([
+              expect.objectContaining({ content: 'partial final', status: 'complete' }),
+            ]),
+          }),
+        ],
+      }),
+    );
+  });
+
+  it('backs off automatic retries after sync errors and resumes after recovery', async () => {
+    const state = useWorkspace();
+    await state.initialize();
+    bridge.storageStatus.mockRejectedValueOnce(new Error('sync drive offline'));
+    await state.pollStorage();
+    await state.pollStorage();
+    expect(bridge.storageStatus).toHaveBeenCalledTimes(1);
+    expect(state.syncError.value).toContain('offline');
+    await vi.advanceTimersByTimeAsync(60000);
+    await state.pollStorage();
+    expect(bridge.storageStatus).toHaveBeenCalledTimes(2);
+    expect(state.syncError.value).toBe('');
+  });
+
   it('flushes local edits before switching directories and preserves loaded conversations', async () => {
     const state = useWorkspace();
     await state.initialize();
@@ -729,6 +887,7 @@ describe('storage synchronization lifecycle', () => {
     bridge.loadWorkspace.mockResolvedValue(remote);
     bridge.storageStatus.mockResolvedValue({ pending: true, conflicts: [] });
     await state.pollStorage();
+    expect(bridge.saveWorkspace).not.toHaveBeenCalled();
     const writes = bridge.saveWorkspace.mock.calls.length;
     await vi.advanceTimersByTimeAsync(1000);
     expect(state.current.value!.title).toBe('remote');
