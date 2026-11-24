@@ -1687,6 +1687,30 @@ kbd {
 .about-content > .version-tag {
   margin: 12px 0 15px;
 }
+.about-updates {
+  display: grid;
+  justify-items: center;
+  gap: 8px;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+.about-update-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+}
+.about-update-actions:empty {
+  display: none;
+}
+.about-updates .field-help {
+  margin: 0;
+  font-size: 12px;
+}
+.about-updates progress {
+  width: min(240px, 100%);
+  accent-color: var(--accent);
+}
 .about-content .about-description {
   margin: 15px 0;
   font-size: 11px;

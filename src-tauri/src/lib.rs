@@ -10,6 +10,7 @@ mod sse;
 mod storage;
 mod sync_store;
 mod titles;
+mod updates;
 mod vault;
 
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -86,6 +87,18 @@ async fn load_workspace(app: tauri::AppHandle) -> Result<Option<Workspace>, Stri
 #[tauri::command]
 async fn save_workspace(app: tauri::AppHandle, workspace: Workspace) -> Result<(), String> {
     with_storage(app, move |session, _| session.save(&workspace)).await
+}
+#[tauri::command]
+async fn read_api_key(app: tauri::AppHandle, connection_id: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        if matches!(connection_id.as_str(), "tools" | "upload") {
+            return Err("无效的模型连接。".into());
+        }
+        stored_secret(&app, &format!("secret/{connection_id}"))?
+            .ok_or_else(|| "当前数据目录中未找到此连接的密钥。".into())
+    })
+    .await
+    .map_err(|_| "读取模型密钥失败。".to_string())?
 }
 #[tauri::command]
 async fn save_api_key(
@@ -732,9 +745,13 @@ async fn stream_chat(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    #[cfg(desktop)]
+    let builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
+    builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .manage(updates::InstallLock::default())
         .setup(|app| {
             credentials::initialize(
                 &app.config().identifier,
@@ -762,6 +779,7 @@ pub fn run() {
             save_configuration_file,
             preview_configuration,
             import_configuration,
+            read_api_key,
             save_api_key,
             delete_api_key,
             fetch_models,
@@ -780,7 +798,9 @@ pub fn run() {
             discover_mcp_tools,
             approve_tool,
             test_http_tool,
-            test_brave_search
+            test_brave_search,
+            updates::check_updates,
+            updates::install_update,
         ])
         .run(tauri::generate_context!())
         .expect("error while running oh-my-chatwise");

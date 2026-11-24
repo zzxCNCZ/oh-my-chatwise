@@ -1180,9 +1180,14 @@ a:focus-visible {
 }
 .about-content h1 {
   margin-top: 23px;
+  max-width: 100%;
+}
+.about-content .brand-logo {
+  max-width: 100%;
 }
 .about-content .brand-wordmark {
   width: 240px;
+  max-width: 100%;
 }
 .about-content .brand-wordmark-dark {
   font-size: 29px;
@@ -1419,6 +1424,19 @@ a:focus-visible {
   }
 }
 @media (max-width: 520px) {
+  .settings-nav {
+    width: 53px;
+    padding-inline: 6px;
+  }
+  .settings-nav > button {
+    justify-content: center;
+    padding: 0;
+    gap: 0;
+    font-size: 0;
+  }
+  .about-content .brand-wordmark-dark {
+    font-size: clamp(18px, 6vw, 29px);
+  }
   .main-header {
     padding-left: 12px;
     padding-right: 10px;

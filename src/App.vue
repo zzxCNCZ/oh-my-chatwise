@@ -57,12 +57,19 @@ import { copyText } from './lib/clipboard';
 import type { Conversation } from './lib/types';
 import { protocols } from './lib/types';
 import { useWorkspace } from './lib/useWorkspace';
+import { useAppUpdates } from './lib/useAppUpdates';
 import { modelLabel } from './lib/useModelCatalog';
 import './style.css';
 
 const state = useWorkspace();
 const { workspace, ready, loadError, current, connection, busy, stopping, activeRequest, toast } =
   state;
+const updates = useAppUpdates(async () => {
+  if (!ready.value || busy.value || state.titlePending.size || state.attachmentActivity.value)
+    throw new Error('请等待工作区加载、生成和附件处理完成。');
+  if (state.dataActivity.value) throw new Error('请等待数据操作完成。');
+  await state.persist();
+});
 const settingsOpen = ref(false);
 const settingsTab = ref<'connections' | 'images' | 'storage' | 'tools' | 'generation' | 'prompts'>(
   'connections',
@@ -291,7 +298,7 @@ function imageSettings() {
   settingsOpen.value = true;
 }
 function keydown(event: KeyboardEvent) {
-  if (state.dataActivity.value) {
+  if (state.dataActivity.value || updates.installing.value) {
     event.preventDefault();
     return;
   }
@@ -356,6 +363,9 @@ const storageActions = {
 onMounted(async () => {
   document.addEventListener('keydown', keydown);
   systemTheme.addEventListener('change', applyTheme);
+  void updates.check().then((update) => {
+    if (update?.version) state.notify(`发现版本 ${update.version}，可在「关于」中查看。`);
+  });
   await state.initialize();
   void state.pollStorage(false);
   storagePoll = setInterval(() => {
@@ -1180,6 +1190,8 @@ onBeforeUnmount(() => {
       :workspace="workspace"
       :initial-tab="settingsTab"
       :busy="busy || state.attachmentActivity.value"
+      :updates="updates"
+      :update-busy="!ready || state.titlePending.size > 0"
       :storage="state.storage.value"
       :storage-actions="storageActions"
       :sync-error="state.syncError.value"

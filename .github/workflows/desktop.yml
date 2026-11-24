@@ -77,11 +77,32 @@ jobs:
         env:
           # Ad-hoc signing needs no certificate. It does not provide Apple notarization.
           APPLE_SIGNING_IDENTITY: '-'
-        run: pnpm tauri build --ci --target aarch64-apple-darwin --bundles app,dmg -- --locked
+          RELEASE_BUILD: ${{ github.ref_type == 'tag' }}
+          UPDATER_PUBLIC_KEY: ${{ github.ref_type == 'tag' && vars.TAURI_UPDATER_PUBLIC_KEY || '' }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ github.ref_type == 'tag' && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ github.ref_type == 'tag' && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=(--ci --target aarch64-apple-darwin --bundles app,dmg)
+          if [[ "$RELEASE_BUILD" == true ]]; then
+            if [[ -z "$UPDATER_PUBLIC_KEY" || -z "$TAURI_SIGNING_PRIVATE_KEY" ]]; then
+              echo '::error::Configure TAURI_UPDATER_PUBLIC_KEY and TAURI_SIGNING_PRIVATE_KEY before tagging a release.'
+              exit 1
+            fi
+            updater_config=$(jq -cn --arg key "$UPDATER_PUBLIC_KEY" \
+              '{bundle: {createUpdaterArtifacts: true}, plugins: {updater: {pubkey: $key}}}')
+            args+=(--config "$updater_config")
+          else
+            unset TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+          fi
+          pnpm tauri build "${args[@]}" -- --locked
 
       - name: Package application and checksums
         env:
           APP_VERSION: ${{ steps.version.outputs.version }}
+          RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+          UPDATER_PUBLIC_KEY: ${{ github.ref_type == 'tag' && vars.TAURI_UPDATER_PUBLIC_KEY || '' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -96,7 +117,32 @@ jobs:
           ditto -c -k --sequesterRsrc --keepParent "$app" \
             "release/oh-my-chatwise_${APP_VERSION}_macos_arm64.app.zip"
           cd release
-          shasum -a 256 -- *.dmg *.zip > SHA256SUMS.txt
+          files=(*.dmg *.zip)
+          if [[ -n "$RELEASE_TAG" ]]; then
+            archive="oh-my-chatwise_${APP_VERSION}_macos_arm64.app.tar.gz"
+            cp "../$app.tar.gz" "$archive"
+            cp "../$app.tar.gz.sig" "$archive.sig"
+            python3 - "$archive.sig" <<'PY'
+          import base64, os, sys
+
+          public_key = base64.b64decode(os.environ["UPDATER_PUBLIC_KEY"], validate=True)
+          with open(sys.argv[1], "rb") as file:
+              signature = base64.b64decode(file.read().strip(), validate=True)
+          public_id = base64.b64decode(public_key.splitlines()[1])[2:10]
+          signature_id = base64.b64decode(signature.splitlines()[1])[2:10]
+          if len(public_id) != 8 or public_id != signature_id:
+              raise SystemExit("Updater public key and signing key do not match.")
+          signed_version = b"version:" + os.environ["APP_VERSION"].encode()
+          if signed_version not in signature.splitlines()[2].split(b"\t"):
+              raise SystemExit("Updater signature does not match the release version.")
+          PY
+            url="https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG/$archive"
+            jq -n --arg version "$APP_VERSION" --arg url "$url" --rawfile signature "$archive.sig" \
+              '{version: $version, platforms: {"darwin-aarch64": {url: $url, signature: ($signature | rtrimstr("\n") | rtrimstr("\r"))}}}' \
+              > latest.json
+            files+=("$archive" "$archive.sig" latest.json)
+          fi
+          shasum -a 256 -- "${files[@]}" > SHA256SUMS.txt
 
       - name: Upload downloadable packages
         uses: actions/upload-artifact@v4

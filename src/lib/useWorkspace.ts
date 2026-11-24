@@ -789,6 +789,7 @@ export function useWorkspace() {
     activeRequest,
     toast,
     initialize,
+    persist,
     createChat,
     showGuide,
     selectModel,

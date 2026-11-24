@@ -14,6 +14,9 @@ export async function saveWorkspace(workspace: Workspace) {
   if (desktop) await invoke('save_workspace', { workspace });
   else localStorage.setItem(storageKey, JSON.stringify(workspace));
 }
+export async function readApiKey(connectionId: string): Promise<string> {
+  return invoke('read_api_key', { connectionId });
+}
 export async function saveApiKey(connectionId: string, apiKey: string) {
   if (!desktop) throw new Error('请在桌面应用中保存 API 密钥。浏览器预览不存储密钥。');
   await invoke('save_api_key', { connectionId, apiKey });

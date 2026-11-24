@@ -25,9 +25,11 @@ pnpm dev
 
 浏览器预览使用独立的 localStorage，支持界面和会话管理，不保存密钥、不发送模型请求。真实请求与凭据存储操作由 Tauri/Rust 提供。
 
+桌面应用启动时自动检查稳定版本，也可以在「设置 → 关于 oh-my-chatwise」手动检查。对于提供签名更新包的版本，可直接下载并安装，完成后应用会重启。当前官方更新包面向 macOS Apple Silicon。
+
 ## 连接模型
 
-打开左下角工作空间设置，在「模型连接」添加连接，填写名称、API 协议、基础地址、API 密钥（可选），然后点击「获取模型」。在返回的列表中搜索、勾选并添加需要的模型，再保存连接。已配置的模型以表格展示，可修改显示名称、移除单个模型或清空后重新选择；顶部模型选择器使用显示名称，实际请求仍发送原始模型 ID。
+打开左下角工作空间设置，在「模型连接」添加连接，填写名称、API 协议、基础地址、API 密钥（可选），然后点击「获取模型」。在返回的列表中搜索、勾选并添加需要的模型，再保存连接。已保存的密钥可点击输入框旁的眼睛查看。已配置的模型以表格展示，可修改显示名称、移除单个模型或清空后重新选择；顶部模型选择器使用显示名称，实际请求仍发送原始模型 ID。
 
 | 协议                    | 基础地址示例                  | 追加的路径          | 认证                                          |
 | ----------------------- | ----------------------------- | ------------------- | --------------------------------------------- |
@@ -278,9 +280,11 @@ git push origin v0.1.0
 
 无需手动配置 GitHub PAT：发布 job 使用仓库自带的 `GITHUB_TOKEN`，仅该 job 申请 `contents: write`；构建和 PR job 保持只读。依赖安装使用 pnpm / Cargo 锁文件，Rust 编译缓存用于后续构建。
 
-当前包使用 **ad-hoc 签名**，不需要上传证书，但不等同于 Apple Developer ID 签名及公证。macOS 首次打开下载的应用可能提示无法验证开发者，需要在「系统设置 → 隐私与安全性」中允许打开。面向公众正式分发时，需要另行配置自己的 Apple Developer ID 证书与公证凭据；此流程不将应用标识或本地用户配置改为其他值，也未启用应用内自动更新。
+发布标签前，使用 `pnpm tauri signer generate -w /安全目录/oh-my-chatwise.key` 为项目生成 Tauri 更新签名密钥。在 GitHub Actions 仓库变量 `TAURI_UPDATER_PUBLIC_KEY` 中填写 `.key.pub` 文件的内容，在仓库 Secret `TAURI_SIGNING_PRIVATE_KEY` 中保存私钥内容，并在 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` 中保存私钥密码（如有）。后续版本沿用同一对密钥。发布流程会将公钥嵌入应用，并上传签名更新包及其 `latest.json`。已安装的旧版需要先手动升级到带更新功能的版本。更新地址使用项目的公开 GitHub Release，客户端需要能访问该地址。
 
-参考：[Tauri GitHub 构建指南](https://v2.tauri.app/distribute/pipelines/github/)、[GitHub runner 说明](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)、[Tauri macOS 签名与公证](https://v2.tauri.app/distribute/sign/macos/)。
+当前 macOS 应用包仍使用 **ad-hoc 签名**。macOS 首次打开下载的应用可能提示无法验证开发者，需要在「系统设置 → 隐私与安全性」中允许打开。面向公众正式分发时，需要另行配置自己的 Apple Developer ID 证书与公证凭据。
+
+参考 [Tauri 更新签名](https://v2.tauri.app/plugin/updater/#signing-updates)、[Tauri GitHub 构建指南](https://v2.tauri.app/distribute/pipelines/github/)、[GitHub runner 说明](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)、[Tauri macOS 签名与公证](https://v2.tauri.app/distribute/sign/macos/)。
 
 ## 目录
 

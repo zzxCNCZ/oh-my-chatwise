@@ -15,6 +15,7 @@ import {
   LoaderCircle,
   Monitor,
   Plus,
+  RefreshCw,
   Settings2,
   FolderSync,
   Wrench,
@@ -22,6 +23,7 @@ import {
   Trash2,
   X,
 } from '@lucide/vue';
+import { openUrl } from '@tauri-apps/plugin-opener';
 import AppIcon from './AppIcon.vue';
 import BrandLogo from './BrandLogo.vue';
 import ModelManager from './ModelManager.vue';
@@ -31,7 +33,8 @@ import ToolSettings from './ToolSettings.vue';
 import GenerationSettings from './GenerationSettings.vue';
 import PromptManager from './PromptManager.vue';
 import { defaultGeneration } from '../lib/workspace';
-import { desktop } from '../lib/bridge';
+import { desktop, readApiKey } from '../lib/bridge';
+import { releasesUrl, type useAppUpdates } from '../lib/useAppUpdates';
 import { version as appVersion } from '../../package.json';
 import { protocols, type Connection, type Workspace } from '../lib/types';
 import { uid } from '../lib/workspace';
@@ -43,6 +46,8 @@ const props = defineProps<{
   syncError: string;
   dataBusy: boolean;
   busy: boolean;
+  updateBusy: boolean;
+  updates: ReturnType<typeof useAppUpdates>;
   save: (connection: Connection, key: string) => Promise<void>;
   remove: (id: string) => Promise<void>;
 }>();
@@ -59,11 +64,49 @@ const saving = ref(false);
 const imageActivity = ref(false);
 const storageActivity = ref(false);
 const toolActivity = ref(false);
+const { status: update, checking, installing, progress, error: updateError } = props.updates;
 const blocked = computed(
-  () => imageActivity.value || storageActivity.value || toolActivity.value || props.dataBusy,
+  () =>
+    imageActivity.value ||
+    storageActivity.value ||
+    toolActivity.value ||
+    props.dataBusy ||
+    installing.value,
 );
+const updateMessage = computed(() => {
+  if (checking.value) return '正在检查更新…';
+  if (updateError.value) return updateError.value;
+  if (installing.value) {
+    if (!progress.value) return '正在准备更新…';
+    if (progress.value.kind === 'installing') return '正在校验并安装更新，完成后将重新启动…';
+    const { received, total } = progress.value;
+    return total
+      ? `正在下载更新… ${Math.min(100, Math.floor((received / total) * 100))}%`
+      : '正在下载更新…';
+  }
+  if (!desktop) return '请在桌面应用中检查和安装更新。';
+  if (update.value?.version) {
+    return update.value.installable
+      ? `发现版本 ${update.value.version}，安装后应用将重新启动。`
+      : `发现版本 ${update.value.version}，可前往发布页面下载安装包。`;
+  }
+  return update.value ? '当前已是最新版本。' : '';
+});
+async function openReleases(event: MouseEvent) {
+  if (!desktop) return;
+  event.preventDefault();
+  try {
+    await openUrl(releasesUrl);
+  } catch {
+    updateError.value = '无法打开发布页面。';
+  }
+}
 const error = ref('');
 const revealKey = ref(false);
+const savedKey = ref('');
+const loadingKey = ref(false);
+const keyError = ref('');
+let keyRequest = 0;
 const deleteConfirm = ref(false);
 const key = ref('');
 const dialog = ref<HTMLElement>();
@@ -80,6 +123,43 @@ const selectedProtocol = computed(() => protocols.find((item) => item.value === 
 const isNew = computed(
   () => !props.workspace.connections.some((item) => item.id === selected.value),
 );
+function hideKey() {
+  keyRequest++;
+  revealKey.value = false;
+  savedKey.value = '';
+  loadingKey.value = false;
+  keyError.value = '';
+}
+async function toggleKey() {
+  if (revealKey.value || loadingKey.value) {
+    hideKey();
+    return;
+  }
+  if (key.value || !form.hasApiKey) {
+    revealKey.value = true;
+    return;
+  }
+  if (!desktop) return;
+
+  const request = ++keyRequest;
+  loadingKey.value = true;
+  keyError.value = '';
+  try {
+    const value = await readApiKey(form.id);
+    if (request !== keyRequest) return;
+    savedKey.value = value;
+    revealKey.value = true;
+  } catch (err) {
+    if (request === keyRequest) keyError.value = String(err);
+  } finally {
+    if (request === keyRequest) loadingKey.value = false;
+  }
+}
+function editKey(event: Event) {
+  key.value = (event.target as HTMLInputElement).value;
+  savedKey.value = '';
+  keyError.value = '';
+}
 function selectConnection(connection?: Connection) {
   selected.value = connection?.id || uid();
   Object.assign(
@@ -104,7 +184,7 @@ function selectConnection(connection?: Connection) {
   );
   key.value = '';
   error.value = '';
-  revealKey.value = false;
+  hideKey();
   deleteConfirm.value = false;
 }
 async function submit() {
@@ -139,6 +219,7 @@ async function submit() {
     return;
   }
   saving.value = true;
+  hideKey();
   try {
     await props.save(
       {
@@ -200,6 +281,7 @@ onMounted(() => {
   dialog.value?.focus();
   document.addEventListener('keydown', trapFocus, true);
 });
+watch(tab, hideKey, { flush: 'sync' });
 watch(
   () => props.workspace.connections,
   () =>
@@ -220,7 +302,10 @@ watch(
       );
   },
 );
-onBeforeUnmount(() => document.removeEventListener('keydown', trapFocus, true));
+onBeforeUnmount(() => {
+  hideKey();
+  document.removeEventListener('keydown', trapFocus, true);
+});
 </script>
 <template>
   <div class="modal-backdrop" @mousedown.self="!saving && !blocked && emit('close')">
@@ -378,18 +463,23 @@ onBeforeUnmount(() => document.removeEventListener('keydown', trapFocus, true));
               >
               <div class="key-input">
                 <KeyRound :size="15" /><input
-                  v-model="key"
+                  :value="key || savedKey"
                   :type="revealKey ? 'text' : 'password'"
                   :placeholder="form.hasApiKey ? '留空以保留已保存的密钥' : '输入你的 API 密钥'"
                   autocomplete="off"
                   :disabled="saving || blocked"
+                  :readonly="loadingKey"
+                  @input="editKey"
                 /><button
                   type="button"
                   class="icon-button"
-                  :aria-label="revealKey ? '隐藏密钥' : '显示密钥'"
-                  @click="revealKey = !revealKey"
+                  :aria-label="loadingKey ? '取消读取密钥' : revealKey ? '隐藏密钥' : '显示密钥'"
+                  :disabled="saving || blocked || (!desktop && form.hasApiKey && !key)"
+                  @click="toggleKey"
                 >
-                  <EyeOff v-if="revealKey" :size="16" /><Eye v-else :size="16" />
+                  <LoaderCircle v-if="loadingKey" :size="16" class="spin" />
+                  <EyeOff v-else-if="revealKey" :size="16" />
+                  <Eye v-else :size="16" />
                 </button>
               </div>
               <span class="field-help">{{
@@ -398,6 +488,7 @@ onBeforeUnmount(() => document.removeEventListener('keydown', trapFocus, true));
                   : '浏览器仅用于界面预览，请在桌面应用中保存密钥和使用模型。'
               }}</span></label
             >
+            <p v-if="keyError" class="inline-error" role="alert">{{ keyError }}</p>
             <ModelManager
               :connection="form"
               :api-key="key"
@@ -516,6 +607,51 @@ onBeforeUnmount(() => document.removeEventListener('keydown', trapFocus, true));
             <h1><BrandLogo :icon-size="0" /></h1>
             <p>一个空间，无限思绪。</p>
             <span class="version-tag">版本 {{ appVersion }}</span>
+            <section class="about-updates" aria-label="版本更新">
+              <div class="about-update-actions">
+                <button
+                  v-if="desktop"
+                  type="button"
+                  class="secondary-button"
+                  :disabled="checking || blocked"
+                  @click="updates.check()"
+                >
+                  <LoaderCircle v-if="checking" :size="15" class="spin" />
+                  <RefreshCw v-else :size="15" />检查更新
+                </button>
+                <button
+                  v-if="update?.installable"
+                  type="button"
+                  class="primary-button"
+                  :disabled="blocked || busy || updateBusy || checking"
+                  @click="updates.install()"
+                >
+                  下载并安装
+                </button>
+              </div>
+              <p v-if="updateMessage" class="field-help" role="status">{{ updateMessage }}</p>
+              <p
+                v-if="update?.installable && !installing && (busy || updateBusy)"
+                class="field-help"
+              >
+                请在工作区加载、生成和附件处理完成后安装。
+              </p>
+              <progress
+                v-if="installing && progress?.kind === 'downloading'"
+                :value="progress.total ? progress.received : undefined"
+                :max="progress.total || 1"
+                aria-label="更新下载进度"
+              />
+              <a
+                v-if="!installing"
+                :href="releasesUrl"
+                class="text-button"
+                target="_blank"
+                rel="noopener noreferrer"
+                @click="openReleases"
+                >查看发布页面</a
+              >
+            </section>
             <p class="about-description">
               由 Vue 3、TypeScript 与 Rust 构建的轻量桌面对话应用。<br />自由连接模型，让每个好想法都有回响。
             </p>
