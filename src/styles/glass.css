@@ -1116,6 +1116,17 @@ a:focus-visible {
   border-radius: 8px;
   background: var(--input);
 }
+.manual-model-add input {
+  border-radius: 10px;
+  min-height: 37px;
+  font-size: 12px;
+  background: var(--input);
+}
+.manual-add-button {
+  min-height: 37px;
+  padding: 0 13px;
+  font-size: 12px;
+}
 .model-catalog,
 .models-empty,
 .tool-config-card,

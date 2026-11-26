@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount } from 'vue';
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue';
 import { Check, ListFilter, LoaderCircle, Plus, RefreshCw, Search, Trash2, X } from '@lucide/vue';
-import { useModelCatalog } from '../lib/useModelCatalog';
+import { mergeManualModels, useModelCatalog } from '../lib/useModelCatalog';
 import type { Connection, ReasoningEffort } from '../lib/types';
 const props = defineProps<{ connection: Connection; apiKey: string; disabled: boolean }>();
 const emit = defineEmits<{
@@ -68,6 +68,45 @@ function remove(id: string) {
 function clear() {
   emit('models', []);
   emit('names', {});
+}
+const manualId = ref('');
+const manualNotice = ref('');
+const manualInput = ref<HTMLInputElement>();
+watch(
+  () => props.connection.id,
+  () => {
+    manualId.value = '';
+    manualNotice.value = '';
+  },
+);
+function addManual() {
+  if (props.disabled) return;
+  const { models, added, duplicates } = mergeManualModels(props.connection.models, manualId.value);
+  if (!added.length) {
+    if (duplicates.length) {
+      manualNotice.value =
+        duplicates.length === 1
+          ? `模型「${duplicates[0]}」已在列表中。`
+          : '输入的模型均已在列表中。';
+    }
+    return;
+  }
+  emit('models', models);
+  selectedIds.value = selectedIds.value.filter((id) => !added.includes(id));
+  manualId.value = '';
+  manualNotice.value = duplicates.length
+    ? `已添加 ${added.length} 个模型，已跳过 ${duplicates.length} 个重复项。`
+    : '';
+}
+function onManualEnter(event: KeyboardEvent) {
+  if (event.isComposing || event.keyCode === 229) return;
+  event.preventDefault();
+  event.stopPropagation();
+  addManual();
+}
+function focusManualInput() {
+  catalog.close();
+  void nextTick(() => manualInput.value?.focus());
 }
 function addSelected() {
   const added = catalog.available.value.filter(
@@ -170,10 +209,33 @@ onBeforeUnmount(catalog.reset);
         </tbody>
       </table>
       <div v-else class="models-empty">
-        <ListFilter :size="22" /><strong>选择你想使用的模型</strong>
-        <p>填写 API 地址与密钥后，点击「获取模型」并勾选添加。</p>
+        <ListFilter :size="22" /><strong>添加你想使用的模型</strong>
+        <p>点击「获取模型」自动拉取，或在下方手动输入模型 ID 添加。</p>
       </div>
     </div>
+    <div class="manual-model-add">
+      <input
+        ref="manualInput"
+        v-model="manualId"
+        type="text"
+        aria-label="手动添加模型 ID"
+        placeholder="手动输入模型 ID，例如 gpt-4.1（多个可用逗号分隔）"
+        maxlength="500"
+        :disabled="disabled"
+        autocomplete="off"
+        :spellcheck="false"
+        @input="manualNotice = ''"
+        @keydown.enter="onManualEnter"
+      /><button
+        type="button"
+        class="secondary-button manual-add-button"
+        :disabled="disabled || !manualId.trim()"
+        @click="addManual"
+      >
+        <Plus :size="14" />手动添加
+      </button>
+    </div>
+    <p v-if="manualNotice" class="manual-model-notice" role="status">{{ manualNotice }}</p>
     <div v-if="opened" class="model-catalog" :aria-busy="loading">
       <div class="catalog-heading">
         <strong>可用模型</strong><span v-if="loaded">{{ catalog.available.value.length }} 个</span
@@ -186,9 +248,14 @@ onBeforeUnmount(catalog.reset);
       </div>
       <div v-else-if="error" class="catalog-error" role="alert">
         <p>{{ error }}</p>
-        <button type="button" class="text-button" @click="catalog.load">
-          <RefreshCw :size="13" />重新获取
-        </button>
+        <div class="catalog-error-actions">
+          <button type="button" class="text-button" @click="catalog.load">
+            <RefreshCw :size="13" />重新获取
+          </button>
+          <button type="button" class="text-button" @click="focusManualInput">
+            <Plus :size="13" />改用手动添加
+          </button>
+        </div>
       </div>
       <template v-else-if="loaded">
         <div v-if="catalog.available.value.length" class="catalog-search">
@@ -266,8 +333,8 @@ onBeforeUnmount(catalog.reset);
     <p class="models-help field-help">
       {{
         canFetch
-          ? '按需添加模型；显示名称仅用于界面，实际请求仍使用原始模型 ID。'
-          : '先填写 API 地址，即可获取此服务提供的模型列表。'
+          ? '可从服务自动获取模型，也可手动输入模型 ID；显示名称仅用于界面，实际请求仍使用原始模型 ID。'
+          : '可直接手动输入模型 ID 添加；填写 API 地址后也可获取服务提供的模型列表。'
       }}
     </p>
   </section>

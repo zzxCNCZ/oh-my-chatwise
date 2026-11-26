@@ -104,3 +104,28 @@ export function modelLabel(connection: Connection | undefined, id: string): stri
   const nickname = connection?.modelNames?.[id];
   return typeof nickname === 'string' && nickname.trim() ? nickname.trim() : id;
 }
+export function parseManualModelIds(input: string): string[] {
+  const seen = new Set<string>();
+  const ids: string[] = [];
+  for (const part of input.split(/[\r\n,，;；]+/)) {
+    const id = part.trim();
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    ids.push(id);
+  }
+  return ids;
+}
+export function mergeManualModels(
+  existing: string[],
+  input: string,
+): { models: string[]; added: string[]; duplicates: string[] } {
+  const parsed = parseManualModelIds(input);
+  const existingSet = new Set(existing);
+  const added = parsed.filter((id) => !existingSet.has(id));
+  const duplicates = parsed.filter((id) => existingSet.has(id));
+  return {
+    models: added.length ? [...existing, ...added] : existing,
+    added,
+    duplicates,
+  };
+}

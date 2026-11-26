@@ -3,7 +3,12 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AvailableModel, Connection } from '../types';
 const fetchModels = vi.hoisted(() => vi.fn());
 vi.mock('../bridge', () => ({ fetchModels }));
-import { modelLabel, useModelCatalog } from '../useModelCatalog';
+import {
+  mergeManualModels,
+  modelLabel,
+  parseManualModelIds,
+  useModelCatalog,
+} from '../useModelCatalog';
 const scopes: ReturnType<typeof effectScope>[] = [];
 function setup() {
   const connection = reactive<Connection>({
@@ -126,5 +131,22 @@ describe('model discovery', () => {
     expect(connection.models).toEqual(['existing']);
     expect(modelLabel({ ...connection, modelNames: undefined }, 'existing')).toBe('existing');
     expect(modelLabel({ ...connection, modelNames: {} }, 'constructor')).toBe('constructor');
+  });
+  it('parses and merges manually entered model IDs with deduplication', () => {
+    expect(
+      parseManualModelIds('  gpt-4.1 , claude-sonnet-4，deepseek-chat; qwen/qwen3:free\ngpt-4.1  '),
+    ).toEqual(['gpt-4.1', 'claude-sonnet-4', 'deepseek-chat', 'qwen/qwen3:free']);
+    expect(parseManualModelIds(' , ， ; \n ')).toEqual([]);
+
+    expect(mergeManualModels(['existing'], 'model-a, existing, model-b')).toEqual({
+      models: ['existing', 'model-a', 'model-b'],
+      added: ['model-a', 'model-b'],
+      duplicates: ['existing'],
+    });
+    expect(mergeManualModels(['existing'], 'existing')).toEqual({
+      models: ['existing'],
+      added: [],
+      duplicates: ['existing'],
+    });
   });
 });

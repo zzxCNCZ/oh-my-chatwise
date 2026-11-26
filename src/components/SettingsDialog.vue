@@ -215,7 +215,7 @@ async function submit() {
     return;
   }
   if (!models.length) {
-    error.value = '请先获取模型列表，并至少添加一个模型。';
+    error.value = '请至少添加一个模型（可获取模型列表或手动输入模型 ID）。';
     return;
   }
   saving.value = true;
