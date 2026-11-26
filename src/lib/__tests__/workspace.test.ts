@@ -654,6 +654,35 @@ describe('conversation lifecycle', () => {
       textAttachments: [expect.objectContaining({ format: 'json' })],
     });
   });
+  it('imports pasted clipboard images into draftImages with normalized names', async () => {
+    const state = useWorkspace();
+    await state.initialize();
+    const pngBytes = new Uint8Array([
+      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d,
+    ]);
+    bridge.importImage.mockResolvedValue({
+      id: 'imported-1',
+      name: 'pasted-image-20261126-160509.png',
+      mediaType: 'image/png',
+      size: pngBytes.length,
+      source: 'base64',
+      local: true,
+      status: 'ready',
+    });
+    const pasted = new File([pngBytes], 'pasted-image-20261126-160509.png', { type: '' });
+    await state.addImageFiles([pasted]);
+    expect(bridge.importImage).toHaveBeenCalledWith(
+      'pasted-image-20261126-160509.png',
+      expect.stringMatching(/^data:image\/png;base64,/),
+    );
+    expect(state.current.value?.draftImages).toHaveLength(1);
+    expect(state.current.value?.draftImages?.[0]).toMatchObject({
+      id: 'imported-1',
+      name: 'pasted-image-20261126-160509.png',
+      status: 'ready',
+      source: 'base64',
+    });
+  });
   it('refuses to send when no connection has been configured', async () => {
     const state = useWorkspace();
     await state.initialize();

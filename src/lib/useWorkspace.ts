@@ -2,7 +2,13 @@ import { computed, reactive, ref, watch } from 'vue';
 import * as bridge from './bridge';
 import { initialTitleGeneration, shouldGenerateTitle, titleContext } from './conversationTitles';
 import { type ToolApproval, type ToolAvailability } from './tools';
-import { fileDataUrl, imageUrl, parseTextFile, MAX_IMAGES } from './attachments';
+import {
+  fileDataUrl,
+  imageUrl,
+  normalizeImageFileName,
+  parseTextFile,
+  MAX_IMAGES,
+} from './attachments';
 import type {
   Connection,
   Conversation,
@@ -625,7 +631,11 @@ export function useWorkspace() {
       });
       chat.draftImages.push(pending);
       try {
-        const imported = await bridge.importImage(file.name, await fileDataUrl(file));
+        const dataUrl = await fileDataUrl(file);
+        const imported = await bridge.importImage(
+          normalizeImageFileName(file.name, dataUrl),
+          dataUrl,
+        );
         const present = chat.draftImages.includes(pending);
         if (!present) continue;
         Object.assign(pending, imported, {

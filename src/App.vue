@@ -51,7 +51,7 @@ import AgentTrace from './components/AgentTrace.vue';
 import ConversationTools from './components/ConversationTools.vue';
 import ToolApprovalDialog from './components/ToolApprovalDialog.vue';
 import { defaultConversationTools, effectivePrompt } from './lib/workspace';
-import { IMAGE_ACCEPT, TEXT_ACCEPT } from './lib/attachments';
+import { IMAGE_ACCEPT, TEXT_ACCEPT, extractClipboardImages, isImageFile } from './lib/attachments';
 import { desktop } from './lib/bridge';
 import { copyText } from './lib/clipboard';
 import type { Conversation } from './lib/types';
@@ -286,12 +286,32 @@ function onDragLeave() {
 async function onDropFiles(event: DragEvent) {
   dragDepth = 0;
   draggingFiles.value = false;
+  if (!current.value || loadError.value || state.dataActivity.value || updates.installing.value)
+    return;
   const files = Array.from(event.dataTransfer?.files || []);
-  const images = files.filter(
-    (file) => file.type.startsWith('image/') || /\.(png|jpe?g|webp|gif|svg|heic)$/i.test(file.name),
-  );
+  const images = files.filter((file) => isImageFile(file));
   const texts = files.filter((file) => !images.includes(file));
   await Promise.all([state.addImageFiles(images), state.addTextFiles(texts)]);
+}
+async function handlePaste(event: ClipboardEvent, fromComposer: boolean) {
+  if (!current.value || loadError.value || state.dataActivity.value || updates.installing.value)
+    return;
+  if (!fromComposer) {
+    if (settingsOpen.value || deleteTarget.value || state.pendingApproval.value) return;
+    const target = event.target;
+    if (target === composer.value) return;
+    const element =
+      target instanceof HTMLElement ? target : target instanceof Node ? target.parentElement : null;
+    if (element?.closest('input, textarea, [contenteditable="true"]')) return;
+  }
+  const { files, preventDefault } = extractClipboardImages(event.clipboardData);
+  if (!files.length) return;
+  if (preventDefault || !fromComposer) event.preventDefault();
+  if (!fromComposer) nextTick(() => composer.value?.focus());
+  await state.addImageFiles(files);
+}
+function onDocumentPaste(event: ClipboardEvent) {
+  void handlePaste(event, false);
 }
 function imageSettings() {
   settingsTab.value = 'images';
@@ -362,6 +382,7 @@ const storageActions = {
 };
 onMounted(async () => {
   document.addEventListener('keydown', keydown);
+  document.addEventListener('paste', onDocumentPaste);
   systemTheme.addEventListener('change', applyTheme);
   void updates.check().then((update) => {
     if (update?.version) state.notify(`发现版本 ${update.version}，可在「关于」中查看。`);
@@ -377,6 +398,7 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   clearInterval(storagePoll);
   document.removeEventListener('keydown', keydown);
+  document.removeEventListener('paste', onDocumentPaste);
   systemTheme.removeEventListener('change', applyTheme);
 });
 </script>
@@ -955,6 +977,7 @@ onBeforeUnmount(() => {
                     resizeComposer();
                   "
                   @keydown="composerKeydown"
+                  @paste="handlePaste($event, true)"
                 />
                 <div class="composer-toolbar">
                   <div class="composer-tools">
@@ -999,7 +1022,7 @@ onBeforeUnmount(() => {
                     </div>
                     <button
                       class="attachment-tool"
-                      title="添加 PNG / JPEG / WebP 图片（单张 5 MB）"
+                      title="添加 PNG / JPEG / WebP 图片（单张 5 MB，支持直接粘贴剪贴板图片）"
                       aria-label="添加图片"
                       @click="imageInput?.click()"
                     >

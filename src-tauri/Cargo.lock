@@ -2518,7 +2518,7 @@ dependencies = [
 
 [[package]]
 name = "oh-my-chatwise"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "base64 0.22.1",
  "futures-util",
